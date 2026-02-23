@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import warnings
 from pathlib import Path
 
@@ -843,6 +844,51 @@ class TestProgramWrapping:
         session = Session(StrictProgram(), history_field="chat_log")
         session(question="Q1")
         assert len(session) == 1
+
+
+# ---------------------------------------------------------------------------
+# DSPy forward warning regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestForwardWarningRegression:
+    def test_predict_session_init_and_call_do_not_emit_forward_warning(self, caplog):
+        """Session internals should not trigger DSPy's direct-forward warning."""
+        predict = dspy.Predict(QASig)
+
+        def fake_forward(**kwargs):
+            return dspy.Prediction(answer=f"ok:{kwargs.get('question', '')}")
+
+        predict.forward = fake_forward
+
+        with caplog.at_level(logging.WARNING, logger="dspy.primitives.module"):
+            session = Session(predict)
+            session(question="Q1")
+
+        assert not any("Calling module.forward(...)" in r.message for r in caplog.records)
+
+    def test_program_wrapping_calls_do_not_emit_forward_warning(self, caplog):
+        """Program-wrapped sessions should not emit per-turn direct-forward warnings."""
+
+        class Agent(dspy.Module):
+            def __init__(self):
+                super().__init__()
+                self.gen = dspy.Predict(QASig)
+
+                def fake_forward(**kwargs):
+                    return dspy.Prediction(answer=f"ok:{kwargs['question']}")
+
+                self.gen.forward = fake_forward
+
+            def forward(self, question):
+                return self.gen(question=question)
+
+        with caplog.at_level(logging.WARNING, logger="dspy.primitives.module"):
+            session = Session(Agent())
+            session(question="Q1")
+            session(question="Q2")
+
+        assert not any("Calling module.forward(...)" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

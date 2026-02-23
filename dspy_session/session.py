@@ -123,6 +123,23 @@ class Session(dspy.Module):
         raise ValueError(f"Unknown copy_mode: {self.copy_mode}")
 
     # ------------------------------------------------------------------
+    # Low-level attribute access helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_attr_quiet(obj: Any, name: str) -> Any | None:
+        """Get attribute while bypassing dspy.Module.__getattribute__ warnings.
+
+        DSPy warns when `forward` is accessed directly outside `__call__`.
+        We still need read access for signature inspection/wrapping, so use
+        `object.__getattribute__` to bypass that warning path.
+        """
+        try:
+            return object.__getattribute__(obj, name)
+        except AttributeError:
+            return None
+
+    # ------------------------------------------------------------------
     # Predictor preparation
     # ------------------------------------------------------------------
 
@@ -172,7 +189,9 @@ class Session(dspy.Module):
         if getattr(predictor, "_dspy_session_wrapped", False):
             return
 
-        orig_forward = predictor.forward
+        orig_forward = self._get_attr_quiet(predictor, "forward")
+        if orig_forward is None:
+            raise AttributeError(f"Predictor {type(predictor).__name__} has no forward method.")
 
         def wrapped_forward(_self, **kwargs):
             if field_name not in kwargs:
@@ -183,8 +202,8 @@ class Session(dspy.Module):
 
         predictor.forward = types.MethodType(wrapped_forward, predictor)
 
-        if hasattr(predictor, "aforward"):
-            orig_aforward = predictor.aforward
+        orig_aforward = self._get_attr_quiet(predictor, "aforward")
+        if orig_aforward is not None:
 
             async def wrapped_aforward(_self, **kwargs):
                 if field_name not in kwargs:
@@ -203,7 +222,7 @@ class Session(dspy.Module):
         Also detects history-like parameters by annotation and aligns the session
         history_field to that name when found.
         """
-        forward_method = getattr(self.module, "forward", None)
+        forward_method = self._get_attr_quiet(self.module, "forward")
         if forward_method is None:
             return False
 
@@ -394,7 +413,7 @@ class Session(dspy.Module):
             return {k: v for k, v in kwargs.items() if k in allowed}
 
         # For generic programs, if forward has explicit params and no **kwargs, keep only those
-        forward_method = getattr(self.module, "forward", None)
+        forward_method = self._get_attr_quiet(self.module, "forward")
         if forward_method is not None:
             try:
                 sig = inspect.signature(forward_method)
