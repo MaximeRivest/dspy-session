@@ -118,7 +118,28 @@ Use this to verify exact prompt structure before runtime.
 
 ---
 
-## 4) Notes
+## 4) Optimizer loop snippet (session + template adapter)
+
+```python
+# collect conversational data
+session(question="Turn 1")
+session(question="Turn 2")
+
+trainset = session.to_examples(
+    metric=my_metric,
+    min_score=0.5,
+    strict_trajectory=True,
+)
+
+# compile the session-aware module
+optimized = dspy.BootstrapFewShot().compile(session, trainset=trainset)
+```
+
+If you want single-turn optimization only, use `include_history=False` in `to_examples()`.
+
+---
+
+## 5) Notes
 
 - If template contains `{"role": "history"}`, history is expanded at that message position.
 - If template uses `{history(...)}`, history is consumed inline and not auto-injected again.

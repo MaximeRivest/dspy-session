@@ -480,6 +480,7 @@ class Session(dspy.Module):
         new.history_input_fields = (
             set(self.history_input_fields) if self.history_input_fields is not None else None
         )
+        new._initial_history = copy.deepcopy(self._initial_history)
         if self._thread_lock is not None:
             new._thread_lock = threading.Lock()
         if self._async_lock is not None:
