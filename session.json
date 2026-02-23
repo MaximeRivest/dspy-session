@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "history_field": "history",
+  "max_turns": null,
+  "max_stored_turns": null,
+  "copy_mode": "deep",
+  "exclude_fields": [
+    "history"
+  ],
+  "history_input_fields": null,
+  "history_policy": "override",
+  "turns": [],
+  "initial_history": null
+}
