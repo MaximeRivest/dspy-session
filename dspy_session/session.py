@@ -70,9 +70,11 @@ class Session(dspy.Module):
         strict_history_annotation: bool = False,
         copy_mode: Literal["deep", "shallow", "none"] = "deep",
         lock: Literal["none", "thread", "async"] = "none",
+        on_turn: Callable[[Session, Turn], None] | None = None,
     ):
         super().__init__()
 
+        self.on_turn = on_turn
         self.copy_mode = copy_mode
         self.module = self._clone_module(module)
         self.history_field = history_field
@@ -400,6 +402,12 @@ class Session(dspy.Module):
 
         if self.max_stored_turns is not None and len(self._turns) > self.max_stored_turns:
             self._turns = self._turns[-self.max_stored_turns :]
+
+        if self.on_turn is not None:
+            try:
+                self.on_turn(self, turn)
+            except Exception as e:
+                logger.warning("on_turn callback error: %s", e)
 
     # ------------------------------------------------------------------
     # Input/output filtering

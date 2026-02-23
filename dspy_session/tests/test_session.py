@@ -1175,6 +1175,83 @@ class TestUpdateModule:
 # ---------------------------------------------------------------------------
 
 
+class TestOnTurnHook:
+    def test_on_turn_called_per_turn(self):
+        """on_turn callback fires after each recorded turn."""
+        responses = [{"answer": "A"}, {"answer": "B"}]
+        predict = _fake_predict_factory(QASig, responses)
+
+        received = []
+
+        def my_hook(session, turn):
+            received.append((turn.index, turn.inputs["question"], turn.outputs["answer"]))
+
+        session = Session(predict, on_turn=my_hook)
+        session(question="Q1")
+        session(question="Q2")
+
+        assert len(received) == 2
+        assert received[0] == (0, "Q1", "A")
+        assert received[1] == (1, "Q2", "B")
+
+    def test_on_turn_not_called_for_override_passthrough(self):
+        """on_turn should NOT fire for stateless override pass-through."""
+        responses = [{"answer": "A"}]
+        predict = _fake_predict_factory(QASig, responses)
+
+        received = []
+        session = Session(predict, on_turn=lambda s, t: received.append(t))
+        session(question="Q1", history=History(messages=[]))
+
+        assert len(received) == 0  # override policy, no turn recorded
+
+    def test_on_turn_error_does_not_break_session(self):
+        """on_turn errors are swallowed — session still works."""
+        responses = [{"answer": "A"}, {"answer": "B"}]
+        predict = _fake_predict_factory(QASig, responses)
+
+        def bad_hook(session, turn):
+            raise RuntimeError("boom")
+
+        session = Session(predict, on_turn=bad_hook)
+        session(question="Q1")  # should not raise
+        assert len(session.turns) == 1
+
+    def test_on_turn_receives_session_state(self):
+        """on_turn can inspect session.turns to see accumulated state."""
+        responses = [{"answer": "A"}, {"answer": "B"}, {"answer": "C"}]
+        predict = _fake_predict_factory(QASig, responses)
+
+        turn_counts = []
+
+        def track_turns(session, turn):
+            turn_counts.append(len(session.turns))
+
+        session = Session(predict, on_turn=track_turns)
+        session(question="Q1")
+        session(question="Q2")
+        session(question="Q3")
+
+        assert turn_counts == [1, 2, 3]
+
+    def test_on_turn_preserved_in_fork(self):
+        """Forked sessions share the same on_turn callback."""
+        responses = [{"answer": "A"}, {"answer": "B"}]
+        predict = _fake_predict_factory(QASig, responses)
+
+        received = []
+        session = Session(predict, on_turn=lambda s, t: received.append(t.index))
+        session(question="Q1")
+
+        forked = session.fork()
+        responses2 = [{"answer": "C"}]
+        forked.update_module(_fake_predict_factory(QASig, responses2))
+        forked(question="Q2")
+
+        # Both turns logged via same callback
+        assert len(received) == 2
+
+
 class TestInputImmutability:
     def test_mutating_input_after_call_doesnt_corrupt_history(self):
         """Inputs are deep-copied, so post-call mutation doesn't affect recorded turns."""

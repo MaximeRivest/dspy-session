@@ -76,22 +76,22 @@ Prediction(
 
 ```python
 # Turn 2 — the model remembers your name from turn 1
-out2 = session(question="What is my name?")
-print(out2.answer)
+out2 = chat(user="What is my name?")
+print(out2.assistant)
 # Your name is Max.
 ```
 
 ```python
 # Inspect accumulated state
-print(f"Turns so far: {len(session.turns)}")
+print(f"Turns so far: {len(chat.turns)}")
 # Turns so far: 2
 ```
 
 ```python
-print(session.session_history)
+print(chat.session_history)
 # messages=[
-#     {'question': 'Hi! My name is Max and I'm learning DSPy.', 'answer': 'Hello Max! ...'},
-#     {'question': 'What is my name?', 'answer': 'Your name is Max.'}
+#     {'user': 'Hi! My name is Max', 'assistant': 'Hi Max! Nice to meet you. ...'},
+#     {'user': 'What is my name?', 'assistant': 'Your name is Max.'}
 # ]
 ```
 
