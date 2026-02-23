@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dspy-session"
-version = "0.1.0"
+version = "0.1.1"
 description = "Multi-turn session wrapper for DSPy programs — turn any module into a stateful conversation with optimizer-ready linearization."
 readme = "README.md"
 license = {text = "MIT"}
