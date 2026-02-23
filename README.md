@@ -4,8 +4,12 @@
 
 It works with:
 - `dspy.Predict` / `dspy.ChainOfThought`
+- `dspy.ProgramOfThought`
+- `dspy.ReAct`
+- `dspy.CodeAct`
 - composed `dspy.Module` programs with nested predictors
 - any adapter (`ChatAdapter`, `JSONAdapter`, `XMLAdapter`, `TemplateAdapter`, ...)
+
 
 ## Install
 
@@ -61,6 +65,48 @@ What happens:
 5. Turn is recorded with an exact `history_snapshot`
 
 ---
+
+## TemplateAdapter integration (end-to-end pattern)
+
+`dspy-session` works directly with [`dspy-template-adapter`](https://github.com/MaximeRivest/dspy-template-adapter).
+
+```python
+import dspy
+from dspy_session import sessionify
+from dspy_template_adapter import TemplateAdapter, Predict
+
+class ChatSig(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+adapter = TemplateAdapter(
+    messages=[
+        {"role": "system", "content": "You are concise."},
+        {"role": "history"},
+        {"role": "user", "content": "{question}"},
+    ],
+    parse_mode="full_text",
+)
+
+chat = Predict(ChatSig, adapter=adapter)
+session = sessionify(chat, max_turns=10)
+
+# normal runtime (requires configured LM):
+# dspy.configure(lm=dspy.LM("openai/gpt-4o-mini"))
+# out1 = session(question="What is DSPy?")
+# out2 = session(question="And sessionify?")
+
+# prompt inspection without LM call:
+preview_msgs = adapter.preview(
+    signature=session.module.signature,
+    inputs={
+        "question": "And sessionify?",
+        "history": session.session_history,
+    },
+)
+```
+
+If you include `{"role": "history"}`, history appears exactly there. This is the recommended setup for exact prompt placement.
 
 ## Program wrapping (no `history` kwarg required)
 

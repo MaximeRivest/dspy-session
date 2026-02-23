@@ -131,6 +131,45 @@ def test_readme_update_module_pattern():
     assert len(session.turns) == 2
 
 
+def test_readme_template_adapter_pattern():
+    dta = pytest.importorskip("dspy_template_adapter")
+    TemplateAdapter = dta.TemplateAdapter
+    Predict = dta.Predict
+
+    class ChatSig(dspy.Signature):
+        question: str = dspy.InputField()
+        answer: str = dspy.OutputField()
+
+    adapter = TemplateAdapter(
+        messages=[
+            {"role": "system", "content": "You are concise."},
+            {"role": "history"},
+            {"role": "user", "content": "{question}"},
+        ],
+        parse_mode="full_text",
+    )
+
+    # Build predictor with template adapter
+    chat = Predict(ChatSig, adapter=adapter)
+
+    # Wrap with session and simulate two turns without LM
+    session = sessionify(chat)
+    session.add_turn(inputs={"question": "What is DSPy?"}, outputs={"answer": "A framework."})
+
+    preview = adapter.preview(
+        signature=session.module.signature,
+        inputs={
+            "question": "And sessionify?",
+            "history": session.session_history,
+        },
+    )
+
+    # history directive should render prior turn
+    joined = "\n".join(str(m.get("content", "")) for m in preview)
+    assert "What is DSPy?" in joined
+    assert "A framework." in joined
+
+
 @pytest.mark.anyio
 async def test_readme_async_pattern():
     session = sessionify(fake_predict(), lock="async")
