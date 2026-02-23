@@ -57,9 +57,11 @@ class chatsig(dspy.Signature):
 chat = sessionify(dspy.Predict(chatsig))
 chat
 ```
-```
+
+```output:exec-1771888378623-fs68e
 Session(Predict, turns=0, history_field='history')
 ```
+
 
 So If I introduce myself.
 
@@ -67,32 +69,65 @@ So If I introduce myself.
 chat(user="Hi! My name is Max")
 ```
 
-```output:exec-1771881361855-kpp6w
+```output:exec-1771888390725-rus14
 Prediction(
     assistant='Hi Max! Nice to meet you. How can I help you today?'
 )
 ```
 
+The model now knows my name.
 
 ```python
-# Turn 2 — the model remembers your name from turn 1
-out2 = chat(user="What is my name?")
-print(out2.assistant)
-# Your name is Max.
+chat(user="What is my name?")
 ```
 
+```output:exec-1771888395018-jxi0s
+Prediction(
+    assistant='Your name is Max.'
+)
+```
+
+And we can see the underlying structure that the session object is constructing and maintaining:
+
 ```python
-# Inspect accumulated state
-print(f"Turns so far: {len(chat.turns)}")
-# Turns so far: 2
+chat.turns
+```
+
+```output:exec-1771888419438-6ipns
+[
+    Turn(
+        index=0,
+        inputs={'user': 'Hi! My name is Max'},
+        outputs={'assistant': 'Hi Max! Nice to meet you. How can I help you today?'},
+        history_snapshot=History(messages=[]),
+        score=None
+    ),
+    Turn(
+        index=1,
+        inputs={'user': 'What is my name?'},
+        outputs={'assistant': 'Your name is Max.'},
+        history_snapshot=History(
+            messages=[
+                {
+                    'user': 'Hi! My name is Max',
+                    'assistant': 'Hi Max! Nice to meet you. How can I help you today?'
+                }
+            ]
+        ),
+        score=None
+    )
+]
 ```
 
 ```python
 print(chat.session_history)
-# messages=[
-#     {'user': 'Hi! My name is Max', 'assistant': 'Hi Max! Nice to meet you. ...'},
-#     {'user': 'What is my name?', 'assistant': 'Your name is Max.'}
-# ]
+```
+
+```output:exec-1771888519964-bt0mq
+messages=[
+	{'user': 'Hi! My name is Max', 'assistant': 'Hi Max! Nice to meet you. How can I help you today?'},
+	{'user': 'What is my name?', 'assistant': 'Your name is Max.'}
+]
 ```
 
 
@@ -592,6 +627,122 @@ print(len(session3.turns))  # 1 (old turns cleared, new turn recorded)
 
 ---
 
+### 12. Turn callbacks (`on_turn`)
+
+Hook into every recorded turn for logging, streaming, webhooks, or integration
+with external systems. The callback receives the session and the just-recorded
+turn.
+
+```python
+import dspy
+from dspy_session import sessionify
+
+dspy.configure(lm=dspy.LM("openai/gpt-4o-mini"))
+
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+# Simple logging hook
+def log_turn(session, turn):
+    print(f"[Turn {turn.index}] Q: {turn.inputs['question']} → A: {turn.outputs['answer']}")
+    print(f"  History depth: {len(turn.history_snapshot.messages)}")
+
+session = sessionify(dspy.Predict(QA), on_turn=log_turn)
+session(question="What is Python?")
+# [Turn 0] Q: What is Python? → A: Python is a programming language...
+#   History depth: 0
+
+session(question="Who created it?")
+# [Turn 1] Q: Who created it? → A: Guido van Rossum...
+#   History depth: 1
+```
+
+Notes:
+- `on_turn` is **not** called for stateless pass-through (`history_policy="override"` with explicit history) — only for turns that are actually recorded.
+- Errors in the callback are caught and logged as warnings — they never break the session.
+- Forked sessions share the same callback reference.
+
+---
+
+### 13. MLflow integration
+
+`dspy-session` ships with an optional MLflow integration module for experiment
+tracking, turn-level metrics, and model registry. Requires `mlflow >= 2.18`
+(for the `mlflow.dspy` flavor). MLflow is **not** a required dependency — it's
+imported lazily and only needed when you use these features.
+
+```bash
+pip install 'mlflow>=2.18'
+```
+
+#### Log a completed session
+
+Snapshot an entire session as a single MLflow run — params, per-turn step
+metrics, and artifacts (session state, turns detail, linearized examples).
+
+```python
+from dspy_session.integrations.mlflow import log_session
+
+session = sessionify(module)
+session(question="Hi")
+session(question="Follow up")
+
+run_id = log_session(session, experiment="my_chatbot")
+```
+
+What gets logged:
+- **Params**: `session.history_field`, `history_policy`, `module_type`, etc.
+- **Step metrics**: `turn_score` and `history_length` per turn (if scored)
+- **Aggregate metrics**: `score_mean`, `score_min`, `score_max`
+- **Artifacts**: `session_state.json`, `turns.json`, `examples.json`
+
+#### Log examples as an MLflow dataset
+
+```python
+from dspy_session.integrations.mlflow import log_examples
+
+with mlflow.start_run():
+    log_examples(session, dataset_name="chatbot_v1", metric=my_metric, min_score=0.5)
+```
+
+#### Live per-turn logging
+
+Use `mlflow_turn_logger()` as an `on_turn` hook — it starts an MLflow run on
+the first turn and logs metrics at each step in real time.
+
+```python
+from dspy_session.integrations.mlflow import mlflow_turn_logger
+
+tracker = mlflow_turn_logger(experiment="my_chatbot")
+session = sessionify(module, on_turn=tracker)
+
+session(question="Hi")        # starts MLflow run, logs step 0
+session(question="Follow up") # logs step 1
+session(question="Thanks!")   # logs step 2
+
+# When the conversation is done, finalize the run
+tracker.end(session)  # saves session state artifact and closes the run
+```
+
+#### Model registry
+
+Save and load both the DSPy module and session state together.
+
+```python
+from dspy_session.integrations.mlflow import log_model, load_model
+
+# Save — logs module via mlflow.dspy + session state as sibling artifact
+with mlflow.start_run():
+    log_model(session, artifact_path="session")
+
+# Load — restores both the module and accumulated session state
+restored = load_model("runs:/<run_id>/session", module=MyModule())
+print(len(restored.turns))  # turns are restored
+```
+
+---
+
 ## TemplateAdapter integration
 
 `dspy-session` and `dspy-template-adapter` work extremely well together:
@@ -623,6 +774,7 @@ Session(
     strict_history_annotation=False,
     copy_mode="deep",              # deep | shallow | none
     lock="none",                   # none | thread | async
+    on_turn=None,                  # callback(session, turn) called after each recorded turn
 )
 
 # calls
