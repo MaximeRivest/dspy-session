@@ -140,11 +140,10 @@ messages=[
 
 ---
 
-### 2. Wrapping a composed program (no signature changes needed)
+### 2. Composed module wrappers (no signature changes needed)
 
-You don't need to modify your existing `dspy.Module`. Session wraps the
-nested predictors and injects history via context variables — your `forward()`
-stays clean.
+`sessionify` also works with `dspy.Module` classes that call nested predictors.
+Your module stays unchanged; history is injected automatically.
 
 ```python
 import dspy
@@ -163,29 +162,95 @@ class TravelAgent(dspy.Module):
         self.advisor = dspy.ChainOfThought(TravelAdvice)
 
     def forward(self, question):
-        # No history parameter here — session handles it automatically
         return self.advisor(question=question)
 
-session = sessionify(TravelAgent())
-
-out1 = session(question="I'm planning a 2-week trip to Japan in April.")
-print(out1.advice)
-# April is perfect for cherry blossoms! I'd suggest splitting time between
-# Tokyo, Kyoto, and Osaka...
-
-out2 = session(question="What should I pack for the weather?")
-print(out2.advice)
-# For Japan in April, expect mild temperatures (10-20°C). Pack layers,
-# a light rain jacket, and comfortable walking shoes...
-
-out3 = session(question="Any food recommendations for the cities you mentioned?")
-print(out3.advice)
-# In Tokyo, try Tsukiji Outer Market for sushi. In Kyoto, don't miss
-# kaiseki dining. In Osaka, head to Dotonbori for takoyaki and okonomiyaki...
+travel = sessionify(TravelAgent())
+travel
 ```
 
-Notice that by turn 3, the model remembers both the destination (Japan) and the
-specific cities it recommended — all without you passing any history manually.
+```output
+Session(TravelAgent, turns=0, history_field='history')
+```
+
+```python
+travel(question="I'm planning a 2-week trip to Japan in April.")
+```
+
+```output
+Prediction(
+    advice='April is perfect for cherry blossoms! I'd suggest splitting time between Tokyo, Kyoto, and Osaka...'
+)
+```
+
+```python
+travel(question="What should I pack for the weather?")
+```
+
+```output
+Prediction(
+    advice='For Japan in April, expect mild temperatures (10-20°C). Pack layers, a light rain jacket, and comfortable walking shoes...'
+)
+```
+
+```python
+travel(question="Any food recommendations for the cities you mentioned?")
+```
+
+```output
+Prediction(
+    advice='In Tokyo, try Tsukiji Outer Market for sushi. In Kyoto, don't miss kaiseki dining. In Osaka, head to Dotonbori for takoyaki and okonomiyaki...'
+)
+```
+
+```python
+travel.turns
+```
+
+```output
+[
+    Turn(
+        index=0,
+        inputs={'question': "I'm planning a 2-week trip to Japan in April."},
+        outputs={'advice': 'April is perfect ...'},
+        history_snapshot=History(messages=[]),
+        score=None
+    ),
+    Turn(
+        index=1,
+        inputs={'question': 'What should I pack for the weather?'},
+        outputs={'advice': 'For Japan in April, expect mild temperatures (10-20°C). ...'},
+        history_snapshot=History(
+            messages=[
+                {
+                    'question': "I'm planning a 2-week trip to Japan in April.",
+                    'advice': 'April is perfect for cherry blossoms! ...'
+                }
+            ]
+        ),
+        score=None
+    ),
+    Turn(
+        index=2,
+        inputs={'question': 'Any food recommendations for the cities you mentioned?'},
+        outputs={'advice': 'In Tokyo, try Tsukiji ...'},
+        history_snapshot=History(
+            messages=[
+                {
+                    'question': "I'm planning a 2-week trip to Japan in April.",
+                    'advice': 'April is perfect for cherry blossoms! ...'
+                },
+                {
+                    'question': 'What should I pack for the weather?',
+                    'advice': 'For Japan in April, expect mild temperatures ...'
+                }
+            ]
+        ),
+        score=None
+    )
+]
+```
+
+By turn 3, the agent remembers the destination and prior suggestions without any manual history plumbing in `forward()`.
 
 ---
 
