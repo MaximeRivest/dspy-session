@@ -19,7 +19,7 @@ import types
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, get_args, get_origin
+from typing import Any, Callable, Literal, get_args, get_origin, get_type_hints
 
 import dspy
 from dspy.adapters.types.history import History
@@ -60,6 +60,7 @@ class Session(dspy.Module):
         *,
         history_field: str = "history",
         max_turns: int | None = None,
+        max_stored_turns: int | None = None,
         exclude_fields: set[str] | None = None,
         input_field_override: set[str] | None = None,
         history_input_fields: set[str] | None = None,
@@ -67,13 +68,16 @@ class Session(dspy.Module):
         history_policy: Literal["override", "use_if_provided", "replace_session"] = "override",
         on_metric_error: Literal["zero", "raise"] = "zero",
         strict_history_annotation: bool = False,
+        copy_mode: Literal["deep", "shallow", "none"] = "deep",
         lock: Literal["none", "thread", "async"] = "none",
     ):
         super().__init__()
 
-        self.module = copy.deepcopy(module)
+        self.copy_mode = copy_mode
+        self.module = self._clone_module(module)
         self.history_field = history_field
         self.max_turns = max_turns
+        self.max_stored_turns = max_stored_turns
 
         if history_input_fields is not None and input_field_override is not None:
             raise ValueError("Provide either history_input_fields or input_field_override, not both.")
@@ -104,6 +108,19 @@ class Session(dspy.Module):
 
         # Whether top-level program forward accepts history kwarg
         self._module_accepts_history = self._detect_module_accepts_history()
+
+    # ------------------------------------------------------------------
+    # Module cloning
+    # ------------------------------------------------------------------
+
+    def _clone_module(self, module: dspy.Module) -> dspy.Module:
+        if self.copy_mode == "deep":
+            return copy.deepcopy(module)
+        if self.copy_mode == "shallow":
+            return copy.copy(module)
+        if self.copy_mode == "none":
+            return module
+        raise ValueError(f"Unknown copy_mode: {self.copy_mode}")
 
     # ------------------------------------------------------------------
     # Predictor preparation
@@ -181,7 +198,11 @@ class Session(dspy.Module):
         predictor._dspy_session_wrapped = True
 
     def _detect_module_accepts_history(self) -> bool:
-        """Whether top-level module.forward can accept history kwarg."""
+        """Whether top-level module.forward can accept history kwarg.
+
+        Also detects history-like parameters by annotation and aligns the session
+        history_field to that name when found.
+        """
         forward_method = getattr(self.module, "forward", None)
         if forward_method is None:
             return False
@@ -192,8 +213,35 @@ class Session(dspy.Module):
             return False
 
         params = sig.parameters
+
+        # direct name match
         if self.history_field in params:
             return True
+
+        # Resolve postponed annotations (from __future__ import annotations)
+        resolved_hints: dict[str, Any] = {}
+        try:
+            resolved_hints = get_type_hints(forward_method)
+        except Exception:
+            resolved_hints = {}
+
+        # annotation-based match (e.g., parameter named `chat_history`)
+        for name, p in params.items():
+            ann = resolved_hints.get(name, p.annotation)
+            if ann is inspect._empty:
+                continue
+            if _is_history_annotation(ann, strict=self.strict_history_annotation):
+                if name != self.history_field:
+                    warnings.warn(
+                        f"Module forward() uses history-like parameter '{name}'. "
+                        f"Session requested '{self.history_field}'. Using '{name}'.",
+                        stacklevel=3,
+                    )
+                    self.history_field = name
+                    self.exclude_fields.add(name)
+                return True
+
+        # **kwargs fallback
         return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
     # ------------------------------------------------------------------
@@ -322,7 +370,7 @@ class Session(dspy.Module):
     def _record_turn(self, kwargs: dict[str, Any], result: Any, history: History) -> None:
         """Record completed turn."""
         inputs_for_record = copy.deepcopy(self._filter_recordable_inputs(kwargs))
-        outputs_for_record = self._extract_outputs(result)
+        outputs_for_record = copy.deepcopy(self._extract_outputs(result))
         turn = Turn(
             index=len(self._turns),
             inputs=inputs_for_record,
@@ -330,6 +378,9 @@ class Session(dspy.Module):
             history_snapshot=history,
         )
         self._turns.append(turn)
+
+        if self.max_stored_turns is not None and len(self._turns) > self.max_stored_turns:
+            self._turns = self._turns[-self.max_stored_turns :]
 
     # ------------------------------------------------------------------
     # Input/output filtering
@@ -429,7 +480,7 @@ class Session(dspy.Module):
         return removed
 
     def update_module(self, module: dspy.Module) -> None:
-        self.module = copy.deepcopy(module)
+        self.module = self._clone_module(module)
         self._predictor_history_fields.clear()
         self._prepare_predictor_injection()
         self._module_accepts_history = self._detect_module_accepts_history()
@@ -474,7 +525,7 @@ class Session(dspy.Module):
 
     def fork(self) -> Session:
         new = copy.copy(self)
-        new.module = copy.deepcopy(self.module)
+        new.module = self._clone_module(self.module)
         new._turns = copy.deepcopy(self._turns)
         new.exclude_fields = set(self.exclude_fields)
         new.history_input_fields = (
@@ -612,6 +663,8 @@ class Session(dspy.Module):
             "version": 2,
             "history_field": self.history_field,
             "max_turns": self.max_turns,
+            "max_stored_turns": self.max_stored_turns,
+            "copy_mode": self.copy_mode,
             "exclude_fields": list(self.exclude_fields),
             "history_input_fields": (
                 list(self.history_input_fields) if self.history_input_fields is not None else None
@@ -633,20 +686,32 @@ class Session(dspy.Module):
     def load_from(cls, path: str | Path, module: dspy.Module, **kwargs) -> Session:
         data = json.loads(Path(path).read_text())
 
+        version = data.get("version", 1)
+        if version not in (1, 2):
+            raise ValueError(
+                f"Unsupported session state version: {version}. "
+                "Supported versions: 1, 2."
+            )
+
         initial_history_raw = data.get("initial_history")
         initial_history = None
         if isinstance(initial_history_raw, dict) and "messages" in initial_history_raw:
             initial_history = History(messages=initial_history_raw["messages"])
 
+        # version 1 compatibility: used input_field_override key
+        history_input_fields_raw = data.get("history_input_fields", data.get("input_field_override"))
+
         config = {
             "history_field": data.get("history_field", "history"),
             "max_turns": data.get("max_turns"),
+            "max_stored_turns": data.get("max_stored_turns"),
             "exclude_fields": set(data.get("exclude_fields", [])),
             "history_input_fields": (
-                set(data.get("history_input_fields", [])) if data.get("history_input_fields") else None
+                set(history_input_fields_raw) if history_input_fields_raw else None
             ),
             "history_policy": data.get("history_policy", "override"),
             "initial_history": initial_history,
+            "copy_mode": data.get("copy_mode", "deep"),
         }
         config.update(kwargs)
 

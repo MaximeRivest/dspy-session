@@ -183,6 +183,14 @@ session = sessionify(my_module, history_policy="use_if_provided")
 session = sessionify(my_module, max_turns=10)
 ```
 
+### Cap in-memory turn storage (for long-running services)
+
+```python
+session = sessionify(my_module, max_turns=10, max_stored_turns=200)
+# max_turns controls prompt history window
+# max_stored_turns controls retained session.turns in memory
+```
+
 ### Excluding fields (e.g. giant RAG context)
 
 ```python
@@ -265,12 +273,14 @@ Session(
     module,
     history_field="history",
     max_turns=None,
+    max_stored_turns=None,
     exclude_fields=None,
     history_input_fields=None,      # alias: input_field_override
     initial_history=None,
     history_policy="override",     # override | use_if_provided | replace_session
     on_metric_error="zero",        # zero | raise
     strict_history_annotation=False,
+    copy_mode="deep",              # deep | shallow | none
     lock="none",                   # none | thread | async
 )
 
@@ -313,7 +323,8 @@ session.update_module(new_module)
 
 - `Session` is a `dspy.Module`, so nested use inside larger DSPy programs remains optimizer-discoverable via `named_predictors()`.
 - For optimizer replay calls that pass explicit history, Session can behave statelessly (`history_policy="override"`).
-- For very long sessions, use `max_turns` and/or strict filtering strategies.
+- For very long sessions, use `max_turns` and `max_stored_turns` to control prompt and memory growth.
+- If your module is not deepcopy-friendly, use `copy_mode="shallow"` or `copy_mode="none"`.
 
 ## License
 

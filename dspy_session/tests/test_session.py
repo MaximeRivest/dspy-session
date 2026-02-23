@@ -289,6 +289,18 @@ class TestMaxTurns:
         # Turn 1 should still only see turn 0
         assert len(session.turns[1].history_snapshot.messages) == 1
 
+    def test_max_stored_turns_caps_memory(self):
+        responses = [{"answer": str(i)} for i in range(8)]
+        predict = _fake_predict_factory(QASig, responses)
+        session = Session(predict, max_stored_turns=3)
+
+        for i in range(8):
+            session(question=f"Q{i}")
+
+        assert len(session.turns) == 3
+        assert session.turns[0].inputs["question"] == "Q5"
+        assert session.turns[-1].inputs["question"] == "Q7"
+
 
 # ---------------------------------------------------------------------------
 # Initial history
@@ -700,6 +712,35 @@ class TestSerialization:
         # Should be JSON-serializable
         json.dumps(state)
 
+    def test_load_from_rejects_unsupported_version(self, tmp_path):
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps({"version": 999, "turns": []}))
+
+        with pytest.raises(ValueError, match="Unsupported session state version"):
+            Session.load_from(path, _fake_predict_factory(QASig, [{"answer": "x"}]))
+
+    def test_load_from_version1_compat_input_field_override(self, tmp_path):
+        """Version 1 payloads using input_field_override should still load."""
+        path = tmp_path / "v1.json"
+        path.write_text(json.dumps({
+            "version": 1,
+            "history_field": "history",
+            "max_turns": None,
+            "exclude_fields": ["history"],
+            "input_field_override": ["question"],
+            "turns": [
+                {"index": 0, "inputs": {"question": "Q1", "context": "ctx"}, "outputs": {"answer": "A"}, "score": None},
+                {"index": 1, "inputs": {"question": "Q2", "context": "ctx2"}, "outputs": {"answer": "B"}, "score": None},
+            ],
+        }))
+
+        s = Session.load_from(path, _fake_predict_factory(RAGSig, [{"answer": "x"}]))
+        assert len(s.turns) == 2
+        # history_input_fields restored from old key
+        msg = s.turns[1].history_snapshot.messages[0]
+        assert "question" in msg
+        assert "context" not in msg
+
 
 # ---------------------------------------------------------------------------
 # Program-level wrapping
@@ -740,6 +781,18 @@ class TestProgramWrapping:
         session = Session(prog)
         session(question="Q1")
         assert len(session) == 1
+
+    def test_program_history_annotation_detection(self):
+        """If forward has History-typed param with different name, session aligns to it."""
+
+        class AnnProgram(dspy.Module):
+            def forward(self, question, chat_hist: dspy.History | None = None):
+                return dspy.Prediction(answer="ok")
+
+        s = Session(AnnProgram(), history_field="history")
+        assert s.history_field == "chat_hist"
+        s(question="Q1")
+        assert len(s.turns) == 1
 
     def test_program_without_history_still_works_via_predictor_injection(self):
         """Program forward() can omit history; nested predictors still receive it."""
@@ -816,6 +869,23 @@ class TestSessionify:
         assert "Session" in r
         assert "Predict" in r
         assert "turns=0" in r
+
+
+class TestCopyMode:
+    def test_copy_mode_none_uses_same_module(self):
+        predict = dspy.Predict(QASig)
+        session = Session(predict, copy_mode="none")
+        assert session.module is predict
+
+    def test_copy_mode_shallow_uses_different_module(self):
+        predict = dspy.Predict(QASig)
+        session = Session(predict, copy_mode="shallow")
+        assert session.module is not predict
+
+    def test_copy_mode_deep_default(self):
+        predict = dspy.Predict(QASig)
+        session = Session(predict)
+        assert session.module is not predict
 
 
 # ---------------------------------------------------------------------------
@@ -1078,3 +1148,23 @@ class TestInputImmutability:
 
         # The recorded turn should NOT be affected
         assert session.turns[0].inputs["extra"] == ["item1", "item2"]
+
+    def test_mutating_outputs_after_call_doesnt_corrupt_history(self):
+        """Outputs are deep-copied during record."""
+        mutable_output = {"details": ["x", "y"]}
+
+        predict = dspy.Predict(QASig)
+
+        def fake_forward(**kwargs):
+            return dspy.Prediction(answer=mutable_output)
+
+        predict.forward = fake_forward
+        predict.__call__ = fake_forward
+
+        session = Session(predict)
+        session(question="Q1")
+
+        mutable_output["details"].append("z")
+
+        stored = session.turns[0].outputs["answer"]
+        assert stored == {"details": ["x", "y"]}
