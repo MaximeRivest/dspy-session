@@ -108,6 +108,75 @@ preview_msgs = adapter.preview(
 
 If you include `{"role": "history"}`, history appears exactly there. This is the recommended setup for exact prompt placement.
 
+### Contrived but powerful history layouts (TemplateAdapter)
+
+Because TemplateAdapter treats your messages as the prompt, you can place history anywhere.
+
+Use a second input field like `history_text` (rendered from `session.session_history`) when you want nonstandard placement.
+
+```python
+def render_history(history: dspy.History) -> str:
+    lines = []
+    for i, msg in enumerate(history.messages, 1):
+        lines.append(f"Turn {i}: {msg}")
+    return "\n".join(lines)
+```
+
+#### A) Everything in the system prompt
+
+```python
+class WeirdSig(dspy.Signature):
+    question: str = dspy.InputField()
+    history_text: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+adapter = TemplateAdapter(
+    messages=[
+        {"role": "system", "content": "Conversation:\n{history_text}"},
+        {"role": "user", "content": "{question}"},
+    ],
+    parse_mode="full_text",
+)
+
+# each turn:
+# out = session(question=q, history_text=render_history(session.session_history))
+```
+
+#### B) Everything in the user prompt
+
+```python
+adapter = TemplateAdapter(
+    messages=[
+        {"role": "system", "content": "Answer directly."},
+        {
+            "role": "user",
+            "content": "Conversation so far:\n{history_text}\n\nQuestion:\n{question}",
+        },
+    ],
+    parse_mode="full_text",
+)
+```
+
+#### C) Half-and-half split (contrived, but demonstrates control)
+
+```python
+class SplitSig(dspy.Signature):
+    question: str = dspy.InputField()
+    history_facts: str = dspy.InputField()
+    history_recent: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+adapter = TemplateAdapter(
+    messages=[
+        {"role": "system", "content": "Persistent facts:\n{history_facts}"},
+        {"role": "user", "content": "Recent turns:\n{history_recent}\n\nQ: {question}"},
+    ],
+    parse_mode="full_text",
+)
+```
+
+These are intentionally unusual patterns, but they show the core power: `dspy-session` manages state, while TemplateAdapter gives you full prompt-layout control.
+
 ## Program wrapping (no `history` kwarg required)
 
 You do **not** need to modify your program’s `forward` signature.
