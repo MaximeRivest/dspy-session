@@ -66,116 +66,16 @@ What happens:
 
 ---
 
-## TemplateAdapter integration (end-to-end pattern)
+## TemplateAdapter integration
 
-`dspy-session` works directly with [`dspy-template-adapter`](https://github.com/MaximeRivest/dspy-template-adapter).
+`dspy-session` and `dspy-template-adapter` work extremely well together:
 
-```python
-import dspy
-from dspy_session import sessionify
-from dspy_template_adapter import TemplateAdapter, Predict
+- `dspy-session` handles state/history lifecycle
+- `TemplateAdapter` gives exact prompt-layout control
 
-class ChatSig(dspy.Signature):
-    question: str = dspy.InputField()
-    answer: str = dspy.OutputField()
+👉 See the full integration guide (including contrived layouts like "all history in system", "all in user", and split strategies):
 
-adapter = TemplateAdapter(
-    messages=[
-        {"role": "system", "content": "You are concise."},
-        {"role": "history"},
-        {"role": "user", "content": "{question}"},
-    ],
-    parse_mode="full_text",
-)
-
-chat = Predict(ChatSig, adapter=adapter)
-session = sessionify(chat, max_turns=10)
-
-# normal runtime (requires configured LM):
-# dspy.configure(lm=dspy.LM("openai/gpt-4o-mini"))
-# out1 = session(question="What is DSPy?")
-# out2 = session(question="And sessionify?")
-
-# prompt inspection without LM call:
-preview_msgs = adapter.preview(
-    signature=session.module.signature,
-    inputs={
-        "question": "And sessionify?",
-        "history": session.session_history,
-    },
-)
-```
-
-If you include `{"role": "history"}`, history appears exactly there. This is the recommended setup for exact prompt placement.
-
-### Contrived but powerful history layouts (TemplateAdapter)
-
-Because TemplateAdapter treats your messages as the prompt, you can place history anywhere.
-
-Use a second input field like `history_text` (rendered from `session.session_history`) when you want nonstandard placement.
-
-```python
-def render_history(history: dspy.History) -> str:
-    lines = []
-    for i, msg in enumerate(history.messages, 1):
-        lines.append(f"Turn {i}: {msg}")
-    return "\n".join(lines)
-```
-
-#### A) Everything in the system prompt
-
-```python
-class WeirdSig(dspy.Signature):
-    question: str = dspy.InputField()
-    history_text: str = dspy.InputField()
-    answer: str = dspy.OutputField()
-
-adapter = TemplateAdapter(
-    messages=[
-        {"role": "system", "content": "Conversation:\n{history_text}"},
-        {"role": "user", "content": "{question}"},
-    ],
-    parse_mode="full_text",
-)
-
-# each turn:
-# out = session(question=q, history_text=render_history(session.session_history))
-```
-
-#### B) Everything in the user prompt
-
-```python
-adapter = TemplateAdapter(
-    messages=[
-        {"role": "system", "content": "Answer directly."},
-        {
-            "role": "user",
-            "content": "Conversation so far:\n{history_text}\n\nQuestion:\n{question}",
-        },
-    ],
-    parse_mode="full_text",
-)
-```
-
-#### C) Half-and-half split (contrived, but demonstrates control)
-
-```python
-class SplitSig(dspy.Signature):
-    question: str = dspy.InputField()
-    history_facts: str = dspy.InputField()
-    history_recent: str = dspy.InputField()
-    answer: str = dspy.OutputField()
-
-adapter = TemplateAdapter(
-    messages=[
-        {"role": "system", "content": "Persistent facts:\n{history_facts}"},
-        {"role": "user", "content": "Recent turns:\n{history_recent}\n\nQ: {question}"},
-    ],
-    parse_mode="full_text",
-)
-```
-
-These are intentionally unusual patterns, but they show the core power: `dspy-session` manages state, while TemplateAdapter gives you full prompt-layout control.
+- [`docs/template-adapter-integration.md`](docs/template-adapter-integration.md)
 
 ## Program wrapping (no `history` kwarg required)
 
