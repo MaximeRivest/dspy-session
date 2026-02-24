@@ -1,0 +1,35 @@
+{
+  "version": 2,
+  "history_field": "history",
+  "max_turns": null,
+  "max_stored_turns": null,
+  "copy_mode": "deep",
+  "exclude_fields": [
+    "history"
+  ],
+  "history_input_fields": null,
+  "history_policy": "override",
+  "turns": [
+    {
+      "index": 0,
+      "inputs": {
+        "message": "I've been feeling overwhelmed at work lately."
+      },
+      "outputs": {
+        "response": "I\u2019m sorry you\u2019re feeling this way\u2014being overwhelmed at work can really weigh on you. Can you tell me a bit more about what\u2019s been going on? For example, is it the workload itself, tight deadlines, difficult coworkers, or something else that\u2019s making things feel unmanageable?"
+      },
+      "score": null
+    },
+    {
+      "index": 1,
+      "inputs": {
+        "message": "My manager keeps adding tasks without checking my bandwidth."
+      },
+      "outputs": {
+        "response": "That sounds exhausting and frustrating\u2014having more tasks piled on without anyone checking whether you have room for them can make you feel invisible. How long has this been happening, and have you had a chance to speak with your manager about your workload, or does that feel too risky right now?"
+      },
+      "score": null
+    }
+  ],
+  "initial_history": null
+}

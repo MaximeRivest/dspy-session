@@ -439,6 +439,11 @@ print(f"Total training examples: {len(trainset)}")
 # Total training examples: 4
 ```
 
+```output:exec-1771940507703-sj71u
+Total training examples: 4
+```
+
+
 ---
 
 ### 6. Save, load, and resume conversations
@@ -450,7 +455,7 @@ services, user session management, or picking up where you left off.
 import dspy
 from dspy_session import Session, sessionify
 
-dspy.configure(lm=dspy.LM("openai/gpt-4o-mini"))
+dspy.configure(lm=dspy.LM("groq/moonshotai/kimi-k2-instruct-0905"))
 
 class Therapist(dspy.Signature):
     """You are a supportive therapist. Be empathetic and ask follow-up questions."""
@@ -478,6 +483,54 @@ out = restored(message="I tried setting boundaries like you suggested.")
 print(out.response)
 ```
 
+```output:exec-1771941008110-ujgpu
+Saved 2 turns to disk
+Restored 2 turns
+That’s a big step—setting boundaries can feel scary, especially with a manager. How did it go when you tried? Did you notice any change in their behavior, or did it seem to get brushed off?
+```
+
+here is the saved json:
+
+
+```json
+{
+  "version": 2,
+  "history_field": "history",
+  "max_turns": null,
+  "max_stored_turns": null,
+  "copy_mode": "deep",
+  "exclude_fields": [
+    "history"
+  ],
+  "history_input_fields": null,
+  "history_policy": "override",
+  "turns": [
+    {
+      "index": 0,
+      "inputs": {
+        "message": "I've been feeling overwhelmed at work lately."
+      },
+      "outputs": {
+        "response": "I\u2019m sorry you\u2019re feeling this way\u2014being overwhelmed at work can really weigh on you. Can you tell me a bit more about what\u2019s been going on? For example, is it the workload itself, tight deadlines, difficult coworkers, or something else that\u2019s making things feel unmanageable?"
+      },
+      "score": null
+    },
+    {
+      "index": 1,
+      "inputs": {
+        "message": "My manager keeps adding tasks without checking my bandwidth."
+      },
+      "outputs": {
+        "response": "That sounds exhausting and frustrating\u2014having more tasks piled on without anyone checking whether you have room for them can make you feel invisible. How long has this been happening, and have you had a chance to speak with your manager about your workload, or does that feel too risky right now?"
+      },
+      "score": null
+    }
+  ],
+  "initial_history": null
+}
+```
+
+
 #### Starting a session with seed history
 
 Pre-load context without recording it as a regular turn — useful for system
@@ -500,6 +553,11 @@ print(len(session.turns))            # 1 (seed messages don't count as turns)
 print(len(session.session_history.messages))  # 3 (2 seed + 1 new)
 ```
 
+```output:exec-1771941171504-97xl7
+1
+3
+```
+
 ---
 
 ### 7. Forking a conversation
@@ -511,7 +569,7 @@ affecting the original — great for A/B testing responses or "what if" scenario
 import dspy
 from dspy_session import sessionify
 
-dspy.configure(lm=dspy.LM("openai/gpt-4o-mini"))
+dspy.configure(lm=dspy.LM("groq/moonshotai/kimi-k2-instruct-0905"))
 
 class StoryWriter(dspy.Signature):
     """Continue the collaborative story."""
@@ -536,6 +594,12 @@ print(f"Branch B: {len(branch_b.turns)} turns")   # 3
 # Each branch is fully independent — original is untouched
 ```
 
+```output:exec-1771941224768-e2zul
+Original: 2 turns
+Branch A: 3 turns
+Branch B: 3 turns
+```
+
 ---
 
 ### 8. Manual turn editing
@@ -547,7 +611,7 @@ data or correcting a bad model response before continuing.
 import dspy
 from dspy_session import sessionify
 
-dspy.configure(lm=dspy.LM("openai/gpt-4o-mini"))
+dspy.configure(lm=dspy.LM("groq/moonshotai/kimi-k2-instruct-0905"))
 
 class QA(dspy.Signature):
     question: str = dspy.InputField()
@@ -577,6 +641,12 @@ print(f"Turns after undo: {len(session.turns)}")
 # Turns after undo: 0
 ```
 
+```output:exec-1771941299238-oeuf6
+The capital of Germany is Berlin.
+Turns after pop: 1
+Turns after undo: 0
+```
+
 ---
 
 ### 9. Hot-swapping an optimized module
@@ -588,12 +658,12 @@ loading optimized weights — the session state carries over seamlessly.
 import dspy
 from dspy_session import sessionify
 
-dspy.configure(lm=dspy.LM("openai/gpt-4o-mini"))
+dspy.configure(lm=dspy.LM("groq/moonshotai/kimi-k2-instruct-0905"))
 
 class Support(dspy.Signature):
-    """You are a customer support agent for a SaaS product."""
-    question: str = dspy.InputField()
-    reply: str = dspy.OutputField()
+  """You are a customer support agent for a SaaS product."""
+  question: str = dspy.InputField()
+  reply: str = dspy.OutputField()
 
 base_module = dspy.Predict(Support)
 session = sessionify(base_module)
@@ -603,10 +673,17 @@ session(question="I can't log in to my account.")
 session(question="I've already tried resetting my password.")
 
 # Meanwhile, you've optimized a better module offline
+def dummy_metric(example, pred, trace=None, pred_name=None, pred_trace=None):
+  return len(pred.reply) > 10
+
 trainset = session.to_examples()
-optimized_module = dspy.BootstrapFewShot().compile(
+
+optimized_module = dspy.GEPA(
+  metric=dummy_metric, max_metric_calls=10,
+  reflection_lm=dspy.LM(model="gpt-5", temperature=1.0, max_tokens=32000))\
+  .compile(
     dspy.Predict(Support), trainset=trainset
-)
+  )
 
 # Swap in the optimized module — conversation state is preserved
 session.update_module(optimized_module)
@@ -616,6 +693,30 @@ out = session(question="The reset email never arrived.")
 print(out.reply)
 print(f"Total turns (uninterrupted): {len(session.turns)}")
 # Total turns (uninterrupted): 3
+```
+
+```output:exec-1771941765046-ulir9
+2026/02/24 09:02:45 INFO dspy.teleprompt.gepa.gepa: Running GEPA for approx 10 metric calls of the program. This amounts to 5.00 full evals on the train set.
+.
+.
+.
+.
+GEPA Optimization:  80% 8/10 [00:01<00:00,  5.02rollouts/s]
+
+========= opt end =========
+
+Let’s track down that reset email.
+
+1. Double-check the exact spelling of the email address you entered—one wrong letter and the message goes nowhere.  
+2. Look in every folder: Spam, Junk, Promotions, Social, and (if you use Gmail) the “All Mail” view.  
+3. If your company uses a quarantine service (Mimecast, Proofpoint, etc.) ask IT to release anything from noreply@<our-domain>.com.  
+4. Still nothing? I can trigger a fresh reset from our side. Just confirm the email address you want it sent to and I’ll push it within 60 seconds. If that copy also vanishes, we’ll whitelist our domain on your mail server or switch the email on file to an alias you can reach.
+
+Give me the email you’d like the reset sent to and I’ll fire it off right away.
+
+===========================
+
+Total turns (uninterrupted): 3
 ```
 
 ---
