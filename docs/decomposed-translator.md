@@ -156,16 +156,57 @@ class CorrectThenTranslate(dspy.Module):
             target_language=self.target_language,
         )
         return dspy.Prediction(
-            corrected=corrected_pred.corrected,
             translated=translated_pred.translated,
         )
 
 
 dspy.configure(lm=dspy.LM("openai/gpt-4.1"))
-session = sessionify(CorrectThenTranslate(target_language="French"))
+multiturntranslate = sessionify(CorrectThenTranslate(target_language="French"))
+multiturntranslate
+```
 
-print(session(text="This plant is red").translated)
-print(session(text="Can I have it?").translated)
+```output:exec-1771897117758-sq6oo
+Session(CorrectThenTranslate, turns=0, history_field='history')
+```
 
-print(session.session_history)
+
+```python
+multiturntranslate(text="This plant is red")
+```
+
+```output:exec-1771897143497-iosg7
+Prediction(
+    translated='Cette plante est rouge.'
+)
+```
+
+
+```python
+multiturntranslate(text="Can I have it?")
+```
+
+```output:exec-1771897175314-tn7wd
+Prediction(
+    translated="Puis-je l'avoir ?"
+)
+```
+
+
+```python
+multiturntranslate(text="No it to precious, I want to keep it.")
+```
+
+```output:exec-1771897223616-4j1nf
+Prediction(
+    translated='Non, elle est trop précieuse ; je veux la garder.'
+)
+```
+
+
+```python
+print(multiturntranslate.session_history)
+```
+
+```output:exec-1771897277774-smn25
+messages=[{'text': 'This plant is red', 'translated': 'Cette plante est rouge.'}, {'text': 'Can I have it?', 'translated': "Puis-je l'avoir ?"}, {'text': 'No it to precious, I want to keep it.', 'translated': 'Non, elle est trop précieuse ; je veux la garder.'}]
 ```
