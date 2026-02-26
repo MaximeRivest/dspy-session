@@ -974,6 +974,32 @@ print(len(loaded.turns))  # 1
 
 ## Projection helper APIs
 
+`dspy-session` strictly handles **storage** — it decides where ledgers live and when they are wiped. **Projection** is how that stored data gets formatted into actual tokens in the LLM's context window. The session exposes its ledgers via context variables that your modules or adapters can read at runtime.
+
+### The "Push, Don't Peek" principle
+
+The helpers below are deliberately limited. You might wonder: why can't a sibling module read another sibling's history? Why can't every module see every other module's scratchpad? These omissions are intentional architectural guardrails.
+
+**Why no sibling-to-sibling projection (lateral):** If your `writer` secretly reads the `researcher`'s private scratchpad via some hidden helper, you have created an invisible side-channel. DSPy's optimizer sees the writer's signature as `Writer(research_summary) -> draft`. It has no way of knowing that the writer is also conditioning on 10 pages of the researcher's internal notes. When the optimizer tries to figure out why the writer hallucinated, the causal trace is broken. Optimization fails silently.
+
+**The correct alternative:** If the writer needs the researcher's discarded facts, the researcher must explicitly return them as an output field, and the orchestrator must explicitly pass them as an input to the writer. Data flows through the graph's edges (as `InputField` / `OutputField`), not via telepathy. This is the "Push, Don't Peek" principle: if Node A needs Node B's data, Node B must push it as an explicit output.
+
+**Why no all-to-all projection (panoptic):** Flattening every module's entire ledger into every other module's prompt causes two failures. First, token usage explodes — if you have 5 workers each looping 3 times, every LLM call re-tokenizes every other worker's scratchpad. Second, LLMs suffer from "Lost in the Middle" — flooding a strict `DateFormatter` with the `QueryPlanner`'s existential retry-loop statistically degrades the formatter's precision. Nodes work best under strict sensory deprivation: they should see only the exact tokens required for their specific job.
+
+**Why no raw upward projection (inner-to-outer) by default:** In traditional software, `main()` does not read the local variables of its helper functions — it reads the returned result. If the outer orchestrator's context window is flooded with the exact syntax errors and dead-ends of its subordinate SQL generator, it loses focus on the user's macro-goal and starts micromanaging. This is abstraction leakage. The correct path is to use a `consolidator` to distill the inner node's messy retry loop into a clean summary (e.g., "The database lacks a users table"), and let the orchestrator consume that distilled fact via `get_node_memory()`.
+
+**The exception — meta-cognitive auditing:** There is exactly one valid reason to break encapsulation: when a module's literal job is to audit or supervise another module's reasoning process. A `MetaCritic` whose purpose is to diagnose logical flaws in a worker's trial-and-error trace needs to read that raw trace — it is the primary data payload, not just context. For this, `dspy-session` provides `get_child_l1_ledger()` and `get_execution_trace()` as advanced, opt-in helpers.
+
+### The four projection types
+
+| Helper | Source | Projection Type | Purpose |
+|---|---|---|---|
+| `get_current_history()` | Current node's L1 working memory | **Structural** | Provides strictly typed examples of this node's own recent calls to enforce its schema. |
+| `get_node_memory()` | Current node's L2 consolidated memory | **Semantic** | Injects distilled rules/facts learned from past episodes. |
+| `get_outer_history()` | Root orchestrator's L1 working memory | **Contextual** | Gives an isolated inner node read-only situational awareness of the global chat. |
+| `get_child_l1_ledger(path)` | A specific child's raw L1 memory | **Supervisory** (meta-cognitive) | Allows an outer supervisor to read a worker's trial-and-error scratchpad. |
+| `get_execution_trace()` | Entire active execution tree | **Omniscient** (meta-cognitive) | Used for terminal reflection nodes evaluating holistic agent performance. |
+
 ### `get_current_history()`
 
 Retrieves the `History` object for the currently executing turn from inside a running module. This is a low-level escape hatch.
@@ -1073,9 +1099,13 @@ print(out.answer)  # Response informed by the stored facts
 
 ### `get_child_l1_ledger(path)`
 
-Lets a parent module read the internal turn history of a specific nested child.
+This is a **supervisory projection** helper — one of the two meta-cognitive exceptions to the "Push, Don't Peek" principle. It lets a parent module read the raw internal turn history of a specific nested child. Use this only when the parent's job is to audit, supervise, or grade the child's reasoning process.
 
 **Realistic scenario — manager reviewing worker:** Your agent has a `manager` that delegates research to a `searcher` sub-module. The searcher runs several queries internally. Before deciding whether to search more or move to writing, the manager calls `get_child_l1_ledger("searcher")` to see exactly what the searcher found. If the results look thin, the manager tells the searcher to keep going.
+
+**Why this doesn't violate "Push, Don't Peek":** The manager's literal job description is to evaluate the worker's process. The raw scratchpad is the primary data payload here, not an incidental side-channel. This is the same reason a code reviewer reads the actual diff, not just the PR title.
+
+**When NOT to use this:** If you just need the final answer from a child module, have the child return it as an explicit output field. Do not use `get_child_l1_ledger` as a shortcut to avoid defining proper output signatures — that creates the invisible side-channels that break optimizer traces.
 
 ```python
 class SearchSig(dspy.Signature):
@@ -1107,11 +1137,13 @@ with app.use_state(state):
 
 ### `get_execution_trace()`
 
-Returns a structured view of the entire session hierarchy's call stack and state.
+This is the second **meta-cognitive exception** — an **omniscient projection** that returns a structured view of the entire session hierarchy's call stack and state. It is the nuclear option: full visibility into every node's ledger at once.
 
 **Realistic scenario — debugging memory routing:** Your multi-agent system has 5 nested modules. The writer is producing off-topic responses. You call `get_execution_trace()` inside the writer's forward and print it. The trace reveals that the writer's history doesn't include the user's original question because it was set to `"isolated"` when it should have been `"shared"`. You fix the config and the issue disappears.
 
-**When not to use:** In production. This is a development and debugging tool. It's verbose and includes internal state that you wouldn't want to send to an LLM or expose to users.
+**Realistic scenario — terminal reflection node:** At the very end of a complex agentic loop, you have a `Reflector` module whose job is to evaluate the entire pipeline's performance holistically. It needs to see everything — what the planner planned, what the researcher found, what the writer drafted. `get_execution_trace()` gives it the full picture in one call.
+
+**When not to use:** Anything other than debugging or explicit meta-cognitive reflection. Do not inject this into regular worker nodes — it creates the panoptic "everyone sees everything" anti-pattern that causes attention dilution and breaks optimizer traces. In production, this should only appear in dedicated auditing or reflection modules, not in the main data-processing pipeline.
 
 ```python
 class SearchSig(dspy.Signature):
