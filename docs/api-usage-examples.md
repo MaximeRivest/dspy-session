@@ -1018,7 +1018,85 @@ class Agent(dspy.Module):
 
 **Approach 2 — Consolidate into long-term memory.** Make the researcher episodic with a consolidator that extracts "Websites visited: A, B, C" into `l2_memory`. The orchestrator can then access this via `get_node_memory()` in the researcher's next episode, or you can design the orchestrator to read the child's consolidated state. This works well when you don't need the raw details on every turn, just a summary of what happened.
 
+```python
+class SearchQuery(dspy.Signature):
+    """Run a web search."""
+    question: str = dspy.InputField()
+    query: str = dspy.OutputField()
+    urls_visited: str = dspy.OutputField(desc="URLs that were checked")
+
+class ConsolidateResearch(dspy.Signature):
+    """Distill a research episode into key facts and sources for long-term memory."""
+    past_memory: str = dspy.InputField()
+    episode_transcript: str = dspy.InputField()
+    updated_memory: str = dspy.OutputField()
+
+class ResearchOrchestrator(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.researcher = dspy.Predict(SearchQuery)
+        self.answer = dspy.Predict("question, research_notes: str -> response: str")
+
+    def forward(self, question):
+        # The researcher runs multiple searches per user turn
+        self.researcher(question=question)
+        self.researcher(question=f"more details: {question}")
+        # On the next user turn, the orchestrator can read consolidated facts
+        notes = get_node_memory()  # "" on first turn, populated after consolidation
+        return self.answer(question=question, research_notes=notes or "No prior research")
+
+# The researcher is episodic: its scratchpad resets after each user turn,
+# but the consolidator saves "Key sources: url1, url2. Key facts: ..." into l2_memory.
+app = with_memory(
+    ResearchOrchestrator(),
+    child_configs={"researcher": {
+        "lifespan": "episodic",
+        "consolidator": dspy.ChainOfThought(ConsolidateResearch),
+    }},
+)
+state = app.new_state()
+with app.use_state(state):
+    app(question="What are the latest quantum computing breakthroughs?")
+    # Now state.node_states["researcher"].l2_memory contains the consolidated facts & sources
+    # On the next call, the orchestrator reads them via get_node_memory()
+    app(question="Which of those websites had the most detail?")
+```
+
 **Approach 3 — Supervisory projection (meta-cognitive exception).** Use `get_child_l1_ledger("researcher")` inside the orchestrator. This is architecturally valid here because the user is literally asking the agent to introspect on its own process — it is a meta-cognitive query. The orchestrator is acting as a supervisor reviewing the worker's log, which is exactly what `get_child_l1_ledger` was designed for. Just be aware that the optimizer cannot trace this data flow, so use it for introspection/debugging queries, not as the primary data pipeline.
+
+```python
+class SearchQuery(dspy.Signature):
+    """Run a web search."""
+    question: str = dspy.InputField()
+    query: str = dspy.OutputField()
+    urls_visited: str = dspy.OutputField(desc="URLs that were checked")
+
+class AnswerWithContext(dspy.Signature):
+    """Answer the user, optionally referencing what the researcher did."""
+    question: str = dspy.InputField()
+    researcher_log: str = dspy.InputField(desc="Raw log of what the researcher did internally")
+    response: str = dspy.OutputField()
+
+class IntrospectiveAgent(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.researcher = sessionify(dspy.Predict(SearchQuery))
+        self.responder = dspy.Predict(AnswerWithContext)
+
+    def forward(self, question):
+        # Always run the researcher
+        self.researcher(question=question)
+        # Read the researcher's raw scratchpad — the user might ask about it
+        raw_log = get_child_l1_ledger("researcher")
+        return self.responder(question=question, researcher_log=raw_log)
+
+app = with_memory(IntrospectiveAgent())
+state = app.new_state()
+with app.use_state(state):
+    app(question="Research quantum computing for me")
+    # User can now ask about the process itself
+    app(question="What websites did you check?")
+```
 
 **The rule of thumb:** If the data is part of the agent's core answer (the user always needs to see sources), use Approach 1. If the data is supplementary context for future turns (the agent should remember what it found), use Approach 2. If the data is only needed when the user explicitly asks about the process (rare introspection), Approach 3 is fine.
 
