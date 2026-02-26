@@ -444,9 +444,17 @@ print(save_log)  # [{'turn': 0, 'question': "What's your return policy?"}]
 
 Determines whether a nested child module maintains its own private history (`"isolated"`) or reads from its parent's history (`"shared"`).
 
-**Realistic scenario — shared translator:** Your agent has a `translator` sub-module. It needs to see the main conversation to know what language the user is speaking. Setting it to `"shared"` lets it read the parent's history. It doesn't build up its own turn ledger — it just piggybacks on the parent context.
+**How it works under the hood:** When a parent session calls a child session, the child needs to decide what history to inject into its predictor. With `"isolated"` (the default), the child builds its own history from its own turn ledger — it has a completely independent conversation with the LLM that the parent never sees. With `"shared"`, the child skips its own ledger entirely. Instead, it grabs the parent's (or root's) history via a context variable and passes that to the LLM. The child also does not record the turn into its own ledger (since it doesn't own the conversation). This means the child's `turns` list stays empty — it is effectively a stateless window into the parent's conversation context.
 
-**Realistic scenario — isolated code executor:** Your agent has a `code_executor` that iteratively writes and debugs code over several internal calls. You want it to have a private scratchpad of its own attempts, invisible to the parent conversation. Setting it to `"isolated"` gives it its own ledger.
+**What the LLM actually sees:**
+- **Isolated child (default):** The LLM sees only the child's own past calls. If the parent had a 10-turn conversation with the user, and the child was called 3 times internally, the child's LLM sees only those 3 internal calls. It has no idea what the user said to the parent.
+- **Shared child:** The LLM sees the parent's full conversation history — the 10 turns between the user and the parent agent. It does not see its own prior calls (because they were never recorded). Every time the shared child is called, it gets a fresh view of the parent's conversation as if it's seeing it for the first time.
+
+**Realistic scenario — shared translator:** Your agent has a `translator` sub-module. It needs to see the main conversation to know what language the user is speaking and what was just said. Setting it to `"shared"` lets it read the parent's history directly. It doesn't build up its own turn ledger — it piggybacks on the parent context. Every time it's called, it sees the latest state of the user conversation.
+
+**Realistic scenario — isolated code executor:** Your agent has a `code_executor` that iteratively writes and debugs code over several internal calls per user turn. Each call builds on the previous attempt ("try again, but fix the import error"). You want the code executor to see its own chain of attempts, not the user's chat messages about what they want. Setting it to `"isolated"` gives it a private scratchpad. The parent can still read what the executor did via `get_child_l1_ledger("code_executor")`.
+
+**When not to use `"shared"`:** If the child needs to remember its own past work across calls (like a researcher that should know which queries it already tried), `"shared"` is wrong because it never records the child's calls. Use `"isolated"` instead so the child accumulates its own history.
 
 ```python
 class Translate(dspy.Signature):
