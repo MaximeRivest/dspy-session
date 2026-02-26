@@ -1,13 +1,13 @@
 # dspy-session API Usage Examples (one example per parameter/API)
 
 This page is a practical cookbook for every public parameter and API in `dspy-session`.
-All snippets are self-contained and avoid LM calls by stubbing predictors.
+Each snippet uses real DSPy signatures and modules that reflect the scenario being described.
 
 ---
 
 ## Shared setup used in snippets
 
-Every snippet below uses fake predictors so you can run them without an LLM key. Copy this block into a test file or notebook first. You will need this kind of scaffolding whenever you are writing unit tests for session behavior, running CI checks, or just exploring the API locally without burning tokens.
+Every snippet below assumes this setup block has been run first. It configures a cheap LLM and imports everything you need. Swap the model string for whatever provider and model you prefer.
 
 ```python
 import asyncio
@@ -27,24 +27,8 @@ from dspy_session import (
     get_execution_trace,
 )
 
-class QA(dspy.Signature):
-    question: str = dspy.InputField()
-    answer: str = dspy.OutputField()
-
-
-def make_fake_predict(prefix: str = "ok"):
-    p = dspy.Predict(QA)
-
-    def fake_forward(**kwargs):
-        return dspy.Prediction(answer=f"{prefix}:{kwargs.get('question', '')}")
-
-    async def fake_aforward(**kwargs):
-        return dspy.Prediction(answer=f"{prefix}:{kwargs.get('question', '')}")
-
-    p.forward = fake_forward
-    p.__call__ = fake_forward
-    p.aforward = fake_aforward
-    return p
+# Configure a cheap LLM — swap this for any provider/model you prefer.
+dspy.configure(lm=dspy.LM("openai/gpt-4o-mini"))
 ```
 
 ---
@@ -60,10 +44,16 @@ This is the quickest way to give memory to a single DSPy module. Think of it as 
 **When not to use:** If your program is a complex pipeline with multiple sub-modules (planner, researcher, writer), `sessionify` only gives memory to the top-level module. The sub-modules remain stateless. Use `with_memory` instead for that.
 
 ```python
-chat = sessionify(make_fake_predict())
-out = chat(question="Hello")
-print(out.answer)         # ok:Hello
-print(len(chat.turns))    # 1
+class CustomerSupport(dspy.Signature):
+    """Answer customer questions about our products and policies."""
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+support_bot = sessionify(dspy.ChainOfThought(CustomerSupport))
+support_bot(question="What's your return policy?")
+support_bot(question="How long does the refund take?")
+# The model remembers the previous question — it knows "the refund" refers to returns
+print(len(support_bot.turns))  # 2
 ```
 
 ### `with_memory(module, ...)`
@@ -75,20 +65,41 @@ This is designed for complex DSPy programs that contain multiple nested modules.
 **When not to use:** If you just have a single `dspy.Predict` or `dspy.ChainOfThought` with no sub-modules, this is overkill. Use `sessionify` instead.
 
 ```python
-class Agent(dspy.Module):
+class Plan(dspy.Signature):
+    """Decide what to research next given the user's question."""
+    question: str = dspy.InputField()
+    plan: str = dspy.OutputField()
+
+class Search(dspy.Signature):
+    """Generate a focused search query based on the plan."""
+    plan: str = dspy.InputField()
+    query: str = dspy.OutputField()
+
+class WriteReport(dspy.Signature):
+    """Write a clear answer based on the research findings."""
+    question: str = dspy.InputField()
+    findings: str = dspy.InputField()
+    report: str = dspy.OutputField()
+
+class ResearchAgent(dspy.Module):
     def __init__(self):
         super().__init__()
-        self.worker = make_fake_predict("worker")
+        self.planner = dspy.Predict(Plan)
+        self.searcher = dspy.Predict(Search)
+        self.writer = dspy.Predict(WriteReport)
 
     def forward(self, question):
-        return self.worker(question=question)
+        plan = self.planner(question=question)
+        results = self.searcher(plan=plan.plan)
+        return self.writer(question=question, findings=results.query)
 
-app = with_memory(Agent(), recursive=True)
+app = with_memory(ResearchAgent(), recursive=True)
 state = app.new_state()
 with app.use_state(state):
-    app(question="Q1")
-print(len(state.turns))                   # root turns
-print(len(state.node_states["worker"].turns))  # child turns
+    app(question="What are the latest advances in quantum computing?")
+print(len(state.turns))                          # 1 root turn
+print(len(state.node_states["planner"].turns))   # 1 planner turn
+print(len(state.node_states["searcher"].turns))  # 1 searcher turn
 ```
 
 ---
@@ -104,9 +115,15 @@ By default, `dspy-session` injects conversation history into a kwarg called `his
 **When not to use:** If you are starting a project from scratch, just leave the default `"history"`. There is no benefit to changing it unless you have a naming conflict or an existing convention to match.
 
 ```python
-s = sessionify(make_fake_predict(), history_field="chat_history")
-s(question="Q1")
-print(s.history_field)  # chat_history
+class ChatBot(dspy.Signature):
+    """A friendly conversational assistant."""
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+# Your team's codebase uses "chat_history" everywhere — match that convention
+bot = sessionify(dspy.Predict(ChatBot), history_field="chat_history")
+bot(question="Hi there!")
+print(bot.history_field)  # chat_history
 ```
 
 ### `max_turns`
@@ -120,11 +137,18 @@ This limits the number of historical messages the LLM sees in its prompt. It tru
 **When not to use:** Short conversations (under 10 turns) where context window is not a concern. Leaving it unset lets the model see everything.
 
 ```python
-s = sessionify(make_fake_predict(), max_turns=2)
-s(question="Q1")
-s(question="Q2")
-s(question="Q3")
-print(len(s.session_history.messages))  # 2
+class SupportAgent(dspy.Signature):
+    """Answer customer support questions."""
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+# Long conversations: only keep last 2 turns in the prompt to fit context window
+bot = sessionify(dspy.Predict(SupportAgent), max_turns=2)
+bot(question="I need help with my order")
+bot(question="The order number is #12345")
+bot(question="It arrived damaged")
+# Only the 2 most recent turns are sent to the LLM
+print(len(bot.session_history.messages))  # 2
 ```
 
 ### `max_stored_turns`
@@ -136,37 +160,43 @@ Unlike `max_turns` (which limits what the LLM sees), `max_stored_turns` limits h
 **When not to use:** If you plan to call `to_examples()` later to extract a complete training dataset from the conversation, you need all turns. Leaving this unset preserves the full history for later extraction.
 
 ```python
-s = sessionify(make_fake_predict(), max_stored_turns=2)
+class SupportAgent(dspy.Signature):
+    """Answer customer support questions."""
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+# Prevent memory bloat in long-running sessions
+bot = sessionify(dspy.Predict(SupportAgent), max_stored_turns=2)
 for i in range(4):
-    s(question=f"Q{i}")
-print(len(s.turns))  # 2
+    bot(question=f"Question number {i}")
+# Older turns are permanently deleted from memory
+print(len(bot.turns))  # 2
 ```
 
 ### `exclude_fields`
 
 This prevents specific fields from being written into the rolling history ledger. The field is still available during the current turn (the model sees it right now), and it is still saved in `turn.inputs` for the optimizer, but it will not appear in any future turn's history.
 
-**Realistic scenario — ChainOfThought rationale:** You are using `dspy.ChainOfThought`, which produces a `rationale` output field on every turn. After 10 turns, the history would contain 10 rationale paragraphs, each hundreds of tokens long. The user never sees these, and the model doesn't need old rationales to answer the next question. Excluding `rationale` keeps the history clean — just question/answer pairs — while the model still produces rationale on the current turn.
+**Realistic scenario — per-turn search results:** Your agent calls a search API each turn and gets back a big chunk of text in a `search_results` field. The answer already summarizes the useful bits. You don't need the raw search results repeated in the history for every past turn — that would eat your entire context window by turn 5. Excluding `search_results` keeps the history clean (just question/answer pairs) while the model still sees the current turn's results.
 
-**Realistic scenario — per-turn tool output:** Your agent calls a search API each turn and gets back 50KB of raw JSON in a `search_results` field. The answer already summarizes the useful bits. You don't need 50KB of raw JSON repeated in the history for every past turn. Exclude `search_results`.
+**Realistic scenario — ChainOfThought rationale:** You are using `dspy.ChainOfThought`, which produces a `rationale` output on every turn. After 10 turns, the history would contain 10 verbose rationale paragraphs. The user never sees these, and the model doesn't need old rationales to answer the next question. Excluding `rationale` keeps the history lean.
 
 **Common misconception — "I'll pass context once and exclude it":** If you are thinking "I'll pass a document as `context` in turn 1 and exclude it so it doesn't repeat" — be careful. Excluding it means the model will completely forget the document by turn 2. If you want the model to reference that document across the entire conversation, do NOT exclude it. Just let it stay in history. The scenario where `exclude_fields` shines is data that is **different every turn and bulky** — like fresh search results, new rationale, or new tool output — not data you want to persist.
 
 **Optimizer behavior:** Even though the field is excluded from history, `turn.inputs` still faithfully records it. When you call `to_examples()`, the optimizer sees that `search_results` was present during that specific turn. The `history_snapshot` in the example accurately reflects that the LLM did not see past search results — giving the optimizer a perfect trace of what was actually in the context window at each moment.
 
 ```python
-class RAG(dspy.Signature):
+class ContextualQA(dspy.Signature):
+    """Answer questions using search results retrieved fresh each turn."""
     question: str = dspy.InputField()
-    context: str = dspy.InputField()
+    search_results: str = dspy.InputField(desc="Fresh results retrieved for this question")
     answer: str = dspy.OutputField()
 
-p = dspy.Predict(RAG)
-p.forward = lambda **k: dspy.Prediction(answer="A")
-p.__call__ = p.forward
-
-s = sessionify(p, exclude_fields={"context"})
-s(question="Q", context="BIG")
-print(s.session_history.messages[0].keys())  # dict_keys(['question', 'answer'])
+bot = sessionify(dspy.Predict(ContextualQA), exclude_fields={"search_results"})
+bot(question="What's your return policy?", search_results="[Doc: 30-day return window for most items...]")
+bot(question="Does that apply to electronics?", search_results="[Doc: Electronics have a 15-day window...]")
+# History only shows question/answer — no bulky search results repeated
+print(bot.session_history.messages[0].keys())  # dict_keys(['question', 'answer'])
 ```
 
 ### `input_field_override` (legacy alias)
@@ -174,8 +204,12 @@ print(s.session_history.messages[0].keys())  # dict_keys(['question', 'answer'])
 This is a legacy alias for `history_input_fields`. You might encounter it in older codebases. Prefer `history_input_fields` in new code.
 
 ```python
-s = sessionify(make_fake_predict(), input_field_override={"question"})
-s(question="Q1")
+class ChatBot(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+bot = sessionify(dspy.Predict(ChatBot), input_field_override={"question"})
+bot(question="Hello")
 ```
 
 ### `history_input_fields`
@@ -187,9 +221,19 @@ By default, all input fields are recorded into the session history. This paramet
 **Difference from `exclude_fields`:** `exclude_fields` removes fields from both input and output recording in history. `history_input_fields` is an allow-list that only affects inputs. If you need to exclude an output field (like `rationale`), use `exclude_fields`.
 
 ```python
-# Same effect as input_field_override, preferred name.
-s = sessionify(make_fake_predict(), history_input_fields={"question"})
-s(question="Q1")
+class SupportWithMetadata(dspy.Signature):
+    """Answer support questions. Metadata is passed for routing but shouldn't clutter history."""
+    question: str = dspy.InputField()
+    user_id: str = dspy.InputField(desc="Internal routing ID")
+    timestamp: str = dspy.InputField(desc="Request timestamp")
+    locale: str = dspy.InputField(desc="User's locale")
+    answer: str = dspy.OutputField()
+
+# Only record the question in history — not user_id, timestamp, or locale
+bot = sessionify(dspy.Predict(SupportWithMetadata), history_input_fields={"question"})
+bot(question="What's your return policy?", user_id="u_abc", timestamp="2025-01-15T10:00:00", locale="en-US")
+# History is clean: just {"question": "What's your return policy?", "answer": "..."}
+print(bot.session_history.messages[0].keys())
 ```
 
 ### `initial_history`
@@ -203,10 +247,20 @@ This seeds the session with a pre-existing conversation before any real turns ha
 **Edge case:** If you later use `history_policy="replace_session"` and pass a new history, the initial history is overwritten and the old turns are cleared.
 
 ```python
-seed = History(messages=[{"question": "Seed Q", "answer": "Seed A"}])
-s = sessionify(make_fake_predict(), initial_history=seed)
-s(question="Q1")
-print(len(s.turns[0].history_snapshot.messages))  # 1
+class Assistant(dspy.Signature):
+    """A helpful assistant that remembers prior context."""
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+# Resume a conversation from yesterday — loaded from your database
+yesterday = History(messages=[
+    {"question": "I'm looking for a new laptop", "answer": "What's your budget and main use case?"},
+    {"question": "About $1500, mostly for programming", "answer": "I'd recommend the MacBook Pro M3 or ThinkPad X1 Carbon."},
+])
+bot = sessionify(dspy.Predict(Assistant), initial_history=yesterday)
+# The model picks up right where you left off
+bot(question="Which one has better Linux support?")
+print(len(bot.turns[0].history_snapshot.messages))  # 2 (the seeded messages)
 ```
 
 ### `history_policy="override"`
@@ -218,22 +272,36 @@ This is the default policy. When someone passes an explicit `history` kwarg duri
 **When not to use:** If you want the session to keep recording even when explicit history is provided, use `use_if_provided` instead.
 
 ```python
-s = sessionify(make_fake_predict(), history_policy="override")
-s(question="Q1")
-s(question="Q2", history=History(messages=[]))
-print(len(s.turns))  # 1 (explicit-history call not recorded)
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+bot = sessionify(dspy.Predict(QA), history_policy="override")
+bot(question="What's 2+2?")
+# Optimizer passes its own history — session steps aside and doesn't record this turn
+bot(question="What's 3+3?", history=History(messages=[]))
+print(len(bot.turns))  # 1 (the optimizer call was not recorded)
 ```
 
 ### `history_policy="use_if_provided"`
 
 With this policy, if explicit history is provided, the model uses it for the current turn, but the session still records the turn normally.
 
-**Realistic scenario — supervisor correction:** A human supervisor is monitoring a support bot. They notice the conversation went off-track. They inject a corrected history for the next turn ("actually, the user's issue is about billing, not shipping") but still want the session to keep recording from this point forward.
+**Realistic scenario — supervisor correction:** A human supervisor is monitoring a support bot. They notice the conversation went off-track. They inject a corrected history for the next turn ("actually, the user's issue is about shipping, not billing") but still want the session to keep recording from this point forward.
 
 ```python
-s = sessionify(make_fake_predict(), history_policy="use_if_provided")
-s(question="Q1", history=History(messages=[]))
-print(len(s.turns))  # 1
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+# Supervisor can inject corrected context, but the session keeps recording
+bot = sessionify(dspy.Predict(QA), history_policy="use_if_provided")
+bot(question="Tell me about billing")
+corrected = History(messages=[
+    {"question": "The user's issue is about shipping, not billing", "answer": "Understood, switching to shipping."},
+])
+bot(question="When will my package arrive?", history=corrected)
+print(len(bot.turns))  # 2 (both turns recorded)
 ```
 
 ### `history_policy="replace_session"`
@@ -243,10 +311,18 @@ This policy completely overwrites the session's memory when explicit history is 
 **Realistic scenario — "load this old conversation":** Your UI has a sidebar showing past conversations. The user clicks one to resume it. You pass that old conversation as `history`, and the session drops whatever was happening before and starts fresh from the loaded conversation.
 
 ```python
-s = sessionify(make_fake_predict(), history_policy="replace_session")
-s(question="Q1")
-s(question="Fresh", history=History(messages=[{"question": "seed", "answer": "ctx"}]))
-print(len(s.turns))  # 1 (old turns cleared)
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+bot = sessionify(dspy.Predict(QA), history_policy="replace_session")
+bot(question="Current topic discussion")
+# User clicks "load old conversation" in the sidebar
+old_conversation = History(messages=[
+    {"question": "We were discussing project deadlines", "answer": "The deadline is March 15th."},
+])
+bot(question="Can we push that back a week?", history=old_conversation)
+print(len(bot.turns))  # 1 (old turns cleared, fresh start from loaded conversation)
 ```
 
 ### `on_metric_error`
@@ -258,13 +334,18 @@ Controls what happens when a metric function crashes during `score()`.
 **When to use `"raise"`:** When you are developing a new metric and need to see the full stack trace to debug it.
 
 ```python
-s = sessionify(make_fake_predict(), on_metric_error="zero")
-s(question="Q1")
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
 
-def bad_metric(example, pred, trace=None):
-    raise RuntimeError("boom")
+bot = sessionify(dspy.Predict(QA), on_metric_error="zero")
+bot(question="Hello")
 
-scores = s.score(bad_metric)
+def buggy_metric(example, pred, trace=None):
+    raise RuntimeError("metric crashed on corrupted data")
+
+# Evaluation continues despite the crash — scores 0.0 instead of blowing up
+scores = bot.score(buggy_metric)
 print(scores)  # [0.0]
 ```
 
@@ -277,9 +358,13 @@ When enabled, the session identifies history fields by their Python type annotat
 **When not to use:** Most projects have a single history field with a clear name. Strict mode adds no value in that case and can cause issues if your history field has a non-standard annotation.
 
 ```python
-# Enforces strict detection of history annotation when inspecting signatures.
-s = sessionify(make_fake_predict(), strict_history_annotation=True)
-s(question="Q1")
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+# Only identify history fields by their History type annotation, not by name
+bot = sessionify(dspy.Predict(QA), strict_history_annotation=True)
+bot(question="Hello")
 ```
 
 ### `copy_mode`
@@ -293,11 +378,17 @@ Determines whether the wrapped module is deep-copied, shallow-copied, or used by
 **When not to use `"none"`:** If you are mutating the module between sessions (different prompts, different demos), `"none"` means all sessions share the mutation. Use `"deep"` to keep them independent.
 
 ```python
-base = make_fake_predict()
-a = sessionify(base, copy_mode="none")
-b = sessionify(base, copy_mode="deep")
-print(a.module is base)   # True
-print(b.module is base)   # False
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+base_module = dspy.Predict(QA)
+# Production: share the same module weights across sessions
+shared = sessionify(base_module, copy_mode="none")
+# Notebook: get an independent copy for experimentation
+independent = sessionify(base_module, copy_mode="deep")
+print(shared.module is base_module)      # True  — same object in memory
+print(independent.module is base_module) # False — completely separate copy
 ```
 
 ### `lock`
@@ -309,14 +400,18 @@ Adds thread or async locking around session execution to prevent race conditions
 **When not to use:** Single-threaded scripts, notebooks, or batch evaluations. Locking adds overhead and complexity that you don't need when there is no concurrency.
 
 ```python
-s = sessionify(make_fake_predict(), lock="async")
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
 
-async def run():
-    await s.acall(question="Q1")
-    await s.acall(question="Q2")
+bot = sessionify(dspy.Predict(QA), lock="async")
 
-asyncio.run(run())
-print(len(s.turns))  # 2
+async def handle_requests():
+    await bot.acall(question="First concurrent request")
+    await bot.acall(question="Second concurrent request")
+
+asyncio.run(handle_requests())
+print(len(bot.turns))  # 2
 ```
 
 ### `on_turn`
@@ -330,14 +425,19 @@ A callback function that fires every time a turn finishes recording.
 **Edge case:** Keep the callback fast. If your hook does a slow database write, it blocks the session's response. For heavy I/O, consider queuing the work to a background task inside the hook.
 
 ```python
-events = []
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
 
-def hook(session, turn):
-    events.append((turn.index, turn.inputs["question"]))
+save_log = []
 
-s = sessionify(make_fake_predict(), on_turn=hook)
-s(question="Q1")
-print(events)  # [(0, 'Q1')]
+def auto_save(session, turn):
+    # In production: save to Redis, push to WebSocket, etc.
+    save_log.append({"turn": turn.index, "question": turn.inputs["question"]})
+
+bot = sessionify(dspy.Predict(QA), on_turn=auto_save)
+bot(question="What's your return policy?")
+print(save_log)  # [{'turn': 0, 'question': "What's your return policy?"}]
 ```
 
 ### `isolation`
@@ -349,24 +449,30 @@ Determines whether a nested child module maintains its own private history (`"is
 **Realistic scenario — isolated code executor:** Your agent has a `code_executor` that iteratively writes and debugs code over several internal calls. You want it to have a private scratchpad of its own attempts, invisible to the parent conversation. Setting it to `"isolated"` gives it its own ledger.
 
 ```python
-class Agent(dspy.Module):
+class Translate(dspy.Signature):
+    """Translate text, using conversation context to infer the target language."""
+    text: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+class ChatAgent(dspy.Module):
     def __init__(self):
         super().__init__()
-        self.worker = make_fake_predict("worker")
+        self.translator = dspy.Predict(Translate)
 
     def forward(self, question):
-        return self.worker(question=question)
+        return self.translator(text=question)
 
+# Translator reads the parent's history to know the conversation language
 app = with_memory(
-    Agent(),
-    child_configs={"worker": {"isolation": "shared"}},
+    ChatAgent(),
+    child_configs={"translator": {"isolation": "shared"}},
 )
 state = app.new_state()
 with app.use_state(state):
-    app(question="Q1")
-    app(question="Q2")
-
-print(len(state.node_states["worker"].turns))  # 0 (shared mode doesn't mutate child ledger)
+    app(question="Bonjour, comment ça va?")
+    app(question="Quelle est la météo?")
+# Shared mode: translator has no private ledger, it reads the parent's history
+print(len(state.node_states["translator"].turns))  # 0
 ```
 
 ### `lifespan`
@@ -380,25 +486,32 @@ Controls how long a nested module retains its turns.
 **Realistic scenario — persistent planner:** Your agent's `planner` needs to remember its entire history of plans across the whole conversation so it doesn't repeat strategies. Leave it as `"persistent"` (the default).
 
 ```python
-class Agent(dspy.Module):
+class SearchQuery(dspy.Signature):
+    """Generate a search query to find relevant information."""
+    question: str = dspy.InputField()
+    query: str = dspy.OutputField()
+
+class SearchAgent(dspy.Module):
     def __init__(self):
         super().__init__()
-        self.worker = make_fake_predict("worker")
+        self.searcher = dspy.Predict(SearchQuery)
 
     def forward(self, question):
-        self.worker(question=question)
-        self.worker(question=f"{question} retry")
+        # Searcher runs multiple queries per user turn
+        self.searcher(question=question)
+        self.searcher(question=f"More details on: {question}")
         return dspy.Prediction(answer="done")
 
+# Searcher resets after each user turn — no stale queries from old turns
 app = with_memory(
-    Agent(),
-    child_configs={"worker": {"lifespan": "episodic"}},
+    SearchAgent(),
+    child_configs={"searcher": {"lifespan": "episodic"}},
 )
 state = app.new_state()
 with app.use_state(state):
-    app(question="Q1")
-
-print(len(state.node_states["worker"].turns))  # 0 (episodic cleared at macro-turn end)
+    app(question="quantum computing advances")
+# Episodic: searcher's turns were cleared at the end of the macro-turn
+print(len(state.node_states["searcher"].turns))  # 0
 ```
 
 ### `consolidator`
@@ -410,29 +523,39 @@ A DSPy module that runs at the end of an episode (when `lifespan="episodic"`) to
 **When not to use:** If the sub-module is `"persistent"` (it keeps all turns anyway) or `"stateless"` (it has no turns to consolidate), a consolidator has nothing to do.
 
 ```python
-cons_sig = dspy.Signature("past_memory, episode_transcript -> updated_memory")
-cons = dspy.Predict(cons_sig)
-cons.forward = lambda **k: dspy.Prediction(updated_memory="learned fact")
-cons.__call__ = cons.forward
+class SearchQuery(dspy.Signature):
+    """Generate a search query."""
+    question: str = dspy.InputField()
+    query: str = dspy.OutputField()
 
-class Agent(dspy.Module):
+class Summarize(dspy.Signature):
+    """Summarize research findings into key facts for long-term memory."""
+    past_memory: str = dspy.InputField()
+    episode_transcript: str = dspy.InputField()
+    updated_memory: str = dspy.OutputField()
+
+class ResearchAgent(dspy.Module):
     def __init__(self):
         super().__init__()
-        self.worker = make_fake_predict("worker")
+        self.searcher = dspy.Predict(SearchQuery)
 
     def forward(self, question):
-        self.worker(question=question)
+        self.searcher(question=question)
         return dspy.Prediction(answer="done")
 
+# Searcher is episodic with a consolidator that extracts key facts
 app = with_memory(
-    Agent(),
-    child_configs={"worker": {"lifespan": "episodic", "consolidator": cons}},
+    ResearchAgent(),
+    child_configs={"searcher": {
+        "lifespan": "episodic",
+        "consolidator": dspy.Predict(Summarize),
+    }},
 )
 state = app.new_state()
 with app.use_state(state):
-    app(question="Q1")
-
-print(state.node_states["worker"].l2_memory)  # learned fact
+    app(question="What is quantum computing?")
+# The consolidator summarized the searcher's episode into long-term memory
+print(state.node_states["searcher"].l2_memory)
 ```
 
 ---
@@ -448,16 +571,20 @@ Determines whether `with_memory` should traverse the module tree and wrap nested
 **When to set `False`:** If you only want the top-level agent to have memory (for example, to track user messages) but want sub-modules to remain stateless. Or if you want fine-grained control and prefer to use `child_configs` to wrap only specific children.
 
 ```python
-class Agent(dspy.Module):
+class Plan(dspy.Signature):
+    question: str = dspy.InputField()
+    plan: str = dspy.OutputField()
+
+class PlanningAgent(dspy.Module):
     def __init__(self):
         super().__init__()
-        self.worker = make_fake_predict()
+        self.planner = dspy.Predict(Plan)
 
     def forward(self, question):
-        return self.worker(question=question)
+        return self.planner(question=question)
 
-app = with_memory(Agent(), recursive=True)
-print(isinstance(app.module.worker, Session))  # True
+app = with_memory(PlanningAgent(), recursive=True)
+print(isinstance(app.module.planner, Session))  # True — planner got its own session
 ```
 
 ### `include`
@@ -467,30 +594,40 @@ An explicit allow-list of nested module paths to wrap with memory. Only these pa
 **Realistic scenario:** You have a large agent with 8 sub-modules: `planner`, `researcher`, `writer`, `formatter`, `validator`, `translator`, `summarizer`, `calculator`. Only `planner` and `writer` actually benefit from conversation memory. The rest are pure functions or one-shot tools. Setting `include={"planner", "writer"}` avoids wrapping the other 6 with unnecessary session overhead.
 
 ```python
-class Agent(dspy.Module):
+class Plan(dspy.Signature):
+    question: str = dspy.InputField()
+    plan: str = dspy.OutputField()
+
+class Format(dspy.Signature):
+    text: str = dspy.InputField()
+    formatted: str = dspy.OutputField()
+
+class PipelineAgent(dspy.Module):
     def __init__(self):
         super().__init__()
-        self.keep = make_fake_predict("keep")
-        self.skip = make_fake_predict("skip")
+        self.planner = dspy.Predict(Plan)
+        self.formatter = dspy.Predict(Format)
 
     def forward(self, question):
-        self.keep(question=question)
-        return self.skip(question=question)
+        plan = self.planner(question=question)
+        return self.formatter(text=plan.plan)
 
-app = with_memory(Agent(), include={"keep"})
-print(isinstance(app.module.keep, Session))  # True
-print(isinstance(app.module.skip, Session))  # False
+# Only the planner needs memory — formatter is a pure function
+app = with_memory(PipelineAgent(), include={"planner"})
+print(isinstance(app.module.planner, Session))    # True
+print(isinstance(app.module.formatter, Session))  # False
 ```
 
 ### `exclude`
 
 The inverse of `include`. Everything gets wrapped except the listed paths.
 
-**Realistic scenario:** Almost all your sub-modules benefit from memory, except `json_formatter` which is a deterministic template — giving it history would just waste tokens. Setting `exclude={"json_formatter"}` keeps it stateless while wrapping everything else.
+**Realistic scenario:** Almost all your sub-modules benefit from memory, except `formatter` which is a deterministic template — giving it history would just waste tokens. Setting `exclude={"formatter"}` keeps it stateless while wrapping everything else.
 
 ```python
-app = with_memory(Agent(), exclude={"skip"})
-print(isinstance(app.module.skip, Session))  # False
+# Using the PipelineAgent class from the include example above
+app = with_memory(PipelineAgent(), exclude={"formatter"})
+print(isinstance(app.module.formatter, Session))  # False
 ```
 
 ### `where`
@@ -502,12 +639,13 @@ A programmatic filter function `(path, module) -> bool` that decides which neste
 **When not to use:** If you have a fixed, small set of modules to include or exclude, `include`/`exclude` are simpler and more readable.
 
 ```python
+# Using the PipelineAgent class from the include example above
 app = with_memory(
-    Agent(),
-    where=lambda path, obj: path.startswith("k"),
+    PipelineAgent(),
+    where=lambda path, obj: path != "formatter",
 )
-print(isinstance(app.module.keep, Session))  # True
-print(isinstance(app.module.skip, Session))  # False
+print(isinstance(app.module.planner, Session))    # True
+print(isinstance(app.module.formatter, Session))  # False
 ```
 
 ### `child_configs`
@@ -517,15 +655,16 @@ Per-path configuration dictionaries for nested modules. This is the most powerfu
 **Realistic scenario:** You are building a research agent. The `planner` should be persistent (remembers all past plans). The `researcher` should be episodic with a consolidator (does fresh searches each turn but remembers key facts). The `formatter` should be disabled entirely (pure function, no memory needed). `child_configs` lets you express all of this in one place.
 
 ```python
+# Using the PipelineAgent class from the include example above
 app = with_memory(
-    Agent(),
+    PipelineAgent(),
     child_configs={
-        "keep": {"lifespan": "episodic"},
-        "skip": {"enabled": False},
+        "planner": {"lifespan": "episodic"},
+        "formatter": {"enabled": False},
     },
 )
-print(isinstance(app.module.keep, Session))  # True
-print(isinstance(app.module.skip, Session))  # False
+print(isinstance(app.module.planner, Session))    # True
+print(isinstance(app.module.formatter, Session))  # False
 ```
 
 ---
@@ -541,15 +680,23 @@ These are the cornerstone of production serving. Instead of creating a new sessi
 **Edge case:** If you forget to bind a state, the session falls back to its internal default state. This is fine for notebooks but dangerous in production — two users would share the same conversation.
 
 ```python
-app = with_memory(make_fake_predict())
-alice = app.new_state()
-bob = app.new_state()
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
 
-with app.use_state(alice):
-    app(question="A1")
-with app.use_state(bob):
-    app(question="B1")
+# One global agent shared by all users
+agent = sessionify(dspy.Predict(QA), copy_mode="none")
 
+# Each user gets their own lightweight state container
+alice = agent.new_state()
+bob = agent.new_state()
+
+with agent.use_state(alice):
+    agent(question="I need help with billing")
+with agent.use_state(bob):
+    agent(question="How do I reset my password?")
+
+# Completely separate conversations, same model weights
 print(len(alice.turns), len(bob.turns))  # 1 1
 ```
 
@@ -560,11 +707,15 @@ These properties let you inspect what the session has recorded.
 **Realistic scenario — rendering a chat UI:** Your frontend needs to display chat bubbles. You iterate over `session.turns` to get each turn's `inputs` and `outputs` and render them. `session_history` gives you the formatted `History` object that the LLM would actually see, which is useful for debugging prompt issues. `len(session)` is a quick check for empty conversations (e.g., showing a welcome message when `len(session) == 0`).
 
 ```python
-s = sessionify(make_fake_predict())
-s(question="Q1")
-print(len(s))
-print(s.turns[-1].inputs)
-print(s.session_history.messages)
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+bot = sessionify(dspy.Predict(QA))
+bot(question="What's your return policy?")
+print(len(bot))                      # 1
+print(bot.turns[-1].inputs)          # {'question': "What's your return policy?"}
+print(bot.session_history.messages)  # [{'question': "...", 'answer': "..."}]
 ```
 
 ### `add_turn`, `pop_turn`, `undo`
@@ -578,17 +729,28 @@ Manual manipulation of the conversation ledger.
 **Realistic scenario — undo:** A human reviewer is doing quality control on a bot conversation. They realize the last 3 turns went off-track. They call `undo(steps=3)` to roll the conversation back and try a different approach.
 
 ```python
-s = sessionify(make_fake_predict())
-s.add_turn(inputs={"question": "manual"}, outputs={"answer": "manual-a"})
-print(len(s.turns))
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
 
-removed = s.pop_turn()
-print(removed.inputs["question"])
+bot = sessionify(dspy.Predict(QA))
 
-s(question="Q1")
-s(question="Q2")
-s.undo(steps=1)
-print(len(s.turns))  # 1
+# Import a turn from another system
+bot.add_turn(
+    inputs={"question": "What's your return policy?"},
+    outputs={"answer": "You can return items within 30 days."},
+)
+print(len(bot.turns))  # 1
+
+# User clicks "regenerate" — remove the last response
+removed = bot.pop_turn()
+print(removed.inputs["question"])  # What's your return policy?
+
+# Normal conversation, then undo the last turn
+bot(question="Hello")
+bot(question="What products do you sell?")
+bot.undo(steps=1)
+print(len(bot.turns))  # 1
 ```
 
 ### `reset`
@@ -598,10 +760,15 @@ Clears all turns from the current session state. The module, configuration, and 
 **Realistic scenario:** The user clicks "New Chat" in your UI. You don't need to create a new session object or reload model weights. Just call `reset()` and the conversation starts fresh. If you have `initial_history` set (like a system prompt), it is still there after the reset.
 
 ```python
-s = sessionify(make_fake_predict())
-s(question="Q1")
-s.reset()
-print(len(s.turns))  # 0
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+bot = sessionify(dspy.Predict(QA))
+bot(question="What's your return policy?")
+# User clicks "New Chat"
+bot.reset()
+print(len(bot.turns))  # 0
 ```
 
 ### `fork`
@@ -613,11 +780,22 @@ Creates a completely independent copy of the session, including all its current 
 **Realistic scenario — evaluation:** You want to test how the model responds to the same conversation under different prompts. Fork the session, `update_module()` on the fork with a different prompt, and compare.
 
 ```python
-s = sessionify(make_fake_predict())
-s(question="Q1")
-branch = s.fork()
-branch(question="Q2")
-print(len(s.turns), len(branch.turns))  # 1 2
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+bot = sessionify(dspy.Predict(QA))
+bot(question="Should I use React or Vue for my project?")
+
+# Explore two different directions from the same starting point
+react_branch = bot.fork()
+vue_branch = bot.fork()
+react_branch(question="Tell me more about React's ecosystem")
+vue_branch(question="Tell me more about Vue's learning curve")
+
+print(len(bot.turns))           # 1 (original unchanged)
+print(len(react_branch.turns))  # 2
+print(len(vue_branch.turns))    # 2
 ```
 
 ### `update_module`
@@ -629,10 +807,17 @@ Hot-swaps the underlying DSPy module while keeping the entire conversation state
 **Realistic scenario — dynamic capability upgrade:** A user starts chatting with a general assistant. Midway, they ask a complex coding question. You swap in a code-specialized module with `update_module()` without losing the conversation context.
 
 ```python
-s = sessionify(make_fake_predict("v1"))
-s(question="Q1")
-s.update_module(make_fake_predict("v2"))
-print(s(question="Q2").answer)  # v2:Q2
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+bot = sessionify(dspy.Predict(QA))
+bot(question="What's your return policy?")
+
+# Deploy optimized module overnight — swap it in without losing conversation
+optimized_module = dspy.ChainOfThought(QA)
+bot.update_module(optimized_module)
+bot(question="Does that apply to electronics?")  # continues with full history
 ```
 
 ### `score`
@@ -644,13 +829,20 @@ Runs an evaluation metric against every turn in the session, returning a list of
 **When not to use:** If you only care about a single final answer (not the trajectory), a simple metric on the last turn's output is simpler.
 
 ```python
-s = sessionify(make_fake_predict())
-s(question="Q1")
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
 
-def metric(example, pred, trace=None):
-    return 1.0 if pred.answer.startswith("ok") else 0.0
+bot = sessionify(dspy.Predict(QA))
+bot(question="What's 2+2?")
+bot(question="And what's that times 3?")
 
-print(s.score(metric))  # [1.0]
+def helpfulness(example, pred, trace=None):
+    # In production: use an LLM-as-judge or custom logic
+    return 1.0 if len(pred.answer) > 5 else 0.0
+
+scores = bot.score(helpfulness)
+print(scores)  # e.g., [1.0, 1.0]
 ```
 
 ### `to_examples` / `to_trainset`
@@ -662,11 +854,17 @@ Converts the session's internal ledger into standard `dspy.Example` objects, rea
 **When not to use:** If you are only serving and never plan to optimize, you don't need this. But it's one of the key reasons sessions exist — they bridge runtime usage and offline training.
 
 ```python
-s = sessionify(make_fake_predict())
-s(question="Q1")
-examples = s.to_examples()
-trainset = s.to_trainset()
-print(len(examples), len(trainset))
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+bot = sessionify(dspy.Predict(QA))
+bot(question="What's your return policy?")
+bot(question="How long does a refund take?")
+
+examples = bot.to_examples()    # list of dspy.Example objects
+trainset = bot.to_trainset()    # same thing, alias
+print(len(examples), len(trainset))  # 2 2
 ```
 
 ### `Session.merge_examples`
@@ -676,11 +874,18 @@ Combines examples from multiple independent sessions into a single list.
 **Realistic scenario:** You have 50 customer support sessions from different users. Each has 10-20 turns. You want to aggregate all the good turns into one training dataset. Instead of manually concatenating lists, `merge_examples(session_a, session_b, ..., min_score=0.7)` does it in one call.
 
 ```python
-a = sessionify(make_fake_predict("a"))
-b = sessionify(make_fake_predict("b"))
-a(question="Q1")
-b(question="Q2")
-merged = Session.merge_examples(a, b)
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+# Two separate customer conversations
+alice_session = sessionify(dspy.Predict(QA))
+bob_session = sessionify(dspy.Predict(QA))
+alice_session(question="Help with billing")
+bob_session(question="Help with shipping")
+
+# Combine into one training dataset
+merged = Session.merge_examples(alice_session, bob_session)
 print(len(merged))  # 2
 ```
 
@@ -695,13 +900,20 @@ Serialization APIs for persisting session state to disk or a database.
 **`save_state()` vs `save()`:** `save_state()` returns a Python dictionary — useful when you want to store it in a database or send it over an API. `save(path)` is a convenience that writes the dict to a JSON file directly.
 
 ```python
-s = sessionify(make_fake_predict())
-s(question="Q1")
-state_dict = s.save_state()
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+bot = sessionify(dspy.Predict(QA))
+bot(question="What's your return policy?")
+
+# Get a dict for database storage
+state_dict = bot.save_state()
 print(state_dict["version"])  # 2
 
-s.save("session.json")
-loaded = Session.load_from("session.json", make_fake_predict())
+# Or save straight to a file
+bot.save("conversation.json")
+loaded = Session.load_from("conversation.json", dspy.Predict(QA))
 print(len(loaded.turns))  # 1
 ```
 
@@ -713,23 +925,29 @@ print(len(loaded.turns))  # 1
 
 Retrieves the `History` object for the currently executing turn from inside a running module. This is a low-level escape hatch.
 
-**Realistic scenario — custom prompt formatting:** You are building a custom `TemplateAdapter` that needs to format the conversation history as XML instead of the default chat format. Inside your adapter, you call `get_current_history()` to get the raw history object and render it however you want.
+**Realistic scenario — custom prompt formatting:** You are building a custom module that needs to know how far into the conversation it is, or needs to format the history in a special way before passing it to a sub-predictor. Inside your module's `forward()`, you call `get_current_history()` to get the raw history object and process it however you want.
 
 **When not to use:** In most cases, the session handles history injection automatically. You only need this when you are doing something unusual with how history is rendered or processed inside a custom module.
 
 ```python
-p = dspy.Predict(QA)
+class QA(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
 
-def fake_forward(**kwargs):
-    h = get_current_history()
-    assert isinstance(h, History)
-    return dspy.Prediction(answer="ok")
+class TurnAwareBot(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.qa = dspy.Predict(QA)
 
-p.forward = fake_forward
-p.__call__ = fake_forward
+    def forward(self, question):
+        # Access current history to add turn-awareness
+        h = get_current_history()
+        turn_number = len(h.messages) + 1
+        return self.qa(question=f"[Turn {turn_number}] {question}")
 
-s = sessionify(p)
-s(question="Q1")
+bot = sessionify(TurnAwareBot())
+bot(question="What's your return policy?")
+bot(question="How long does a refund take?")
 ```
 
 ### `get_outer_history()`
@@ -739,20 +957,35 @@ Retrieves the history of the parent or root session from inside a nested child m
 **Realistic scenario:** Your `writer` sub-agent is deeply nested inside a research pipeline. It has its own isolated history of drafts. But to write a good response, it needs to know what the user originally asked — that information lives in the root session's history. Inside `writer.forward()`, you call `get_outer_history()` to read the root conversation and include the user's original question in the prompt.
 
 ```python
-class Agent(dspy.Module):
+class WriterSig(dspy.Signature):
+    """Write a response informed by the full user conversation."""
+    task: str = dspy.InputField()
+    user_context: str = dspy.InputField(desc="Summary of the user's conversation so far")
+    result: str = dspy.OutputField()
+
+class Writer(dspy.Module):
     def __init__(self):
         super().__init__()
-        self.worker = make_fake_predict("w")
+        self.draft = dspy.Predict(WriterSig)
+
+    def forward(self, task):
+        # Read the root conversation to understand the user's original question
+        outer = get_outer_history()
+        context = " | ".join(msg.get("question", "") for msg in outer.messages)
+        return self.draft(task=task, user_context=context or "No prior context")
+
+class MainAgent(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.writer = Writer()
 
     def forward(self, question):
-        outer = get_outer_history()
-        assert isinstance(outer, History)
-        return self.worker(question=question)
+        return self.writer(task=question)
 
-app = with_memory(Agent())
+app = with_memory(MainAgent())
 state = app.new_state()
 with app.use_state(state):
-    app(question="Q1")
+    app(question="Tell me about quantum computing")
 ```
 
 ### `get_node_memory()`
@@ -762,39 +995,61 @@ Retrieves the consolidated long-term facts (`l2_memory`) for the currently execu
 **Realistic scenario:** Your `researcher` sub-module is episodic — its scratchpad resets every user turn. But a consolidator saved "Key facts: User prefers Python. User is building a REST API." into `l2_memory` from previous episodes. Inside `researcher.forward()`, you call `get_node_memory()` and inject these facts into the prompt so the researcher doesn't re-discover things it already learned.
 
 ```python
-class Agent(dspy.Module):
-    def forward(self, question):
-        return dspy.Prediction(answer=get_node_memory())
+class ResearchSig(dspy.Signature):
+    """Research a topic, informed by previously learned facts."""
+    question: str = dspy.InputField()
+    prior_knowledge: str = dspy.InputField(desc="Facts from previous research episodes")
+    answer: str = dspy.OutputField()
 
-app = with_memory(Agent())
-state = app.new_state(l2_memory="facts")
+class Researcher(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.predict = dspy.Predict(ResearchSig)
+
+    def forward(self, question):
+        # Inject consolidated facts from previous episodes
+        facts = get_node_memory()
+        return self.predict(question=question, prior_knowledge=facts or "None yet")
+
+app = with_memory(Researcher())
+state = app.new_state(l2_memory="User prefers Python. User is building a REST API.")
 with app.use_state(state):
-    out = app(question="Q1")
-print(out.answer)  # facts
+    out = app(question="What web framework should I use?")
+print(out.answer)  # Response informed by the stored facts
 ```
 
 ### `get_child_l1_ledger(path)`
 
 Lets a parent module read the internal turn history of a specific nested child.
 
-**Realistic scenario — manager reviewing worker:** Your agent has a `manager` that delegates research to a `researcher` sub-module. The researcher runs 5 search queries internally. Before deciding whether to search more or move to writing, the manager calls `get_child_l1_ledger("researcher")` to see exactly what the researcher found. If the results look thin, the manager tells the researcher to keep going.
+**Realistic scenario — manager reviewing worker:** Your agent has a `manager` that delegates research to a `searcher` sub-module. The searcher runs several queries internally. Before deciding whether to search more or move to writing, the manager calls `get_child_l1_ledger("searcher")` to see exactly what the searcher found. If the results look thin, the manager tells the searcher to keep going.
 
 ```python
-class Agent(dspy.Module):
+class SearchSig(dspy.Signature):
+    query: str = dspy.InputField()
+    result: str = dspy.OutputField()
+
+class DecideSig(dspy.Signature):
+    question: str = dspy.InputField()
+    searcher_log: str = dspy.InputField(desc="What the searcher found so far")
+    decision: str = dspy.OutputField()
+
+class ManagerAgent(dspy.Module):
     def __init__(self):
         super().__init__()
-        self.worker = with_memory(make_fake_predict(), recursive=False)
+        self.searcher = sessionify(dspy.Predict(SearchSig))
+        self.decide = dspy.Predict(DecideSig)
 
     def forward(self, question):
-        self.worker(question=question)
-        ledger = get_child_l1_ledger("worker")
-        return dspy.Prediction(answer=ledger)
+        self.searcher(query=question)
+        # Manager reviews what the searcher found before deciding next steps
+        ledger = get_child_l1_ledger("searcher")
+        return self.decide(question=question, searcher_log=ledger)
 
-app = with_memory(Agent())
+app = with_memory(ManagerAgent())
 state = app.new_state()
 with app.use_state(state):
-    out = app(question="Q1")
-print("Q1" in out.answer)  # True
+    out = app(question="Latest AI research papers")
 ```
 
 ### `get_execution_trace()`
@@ -806,20 +1061,27 @@ Returns a structured view of the entire session hierarchy's call stack and state
 **When not to use:** In production. This is a development and debugging tool. It's verbose and includes internal state that you wouldn't want to send to an LLM or expose to users.
 
 ```python
-class Agent(dspy.Module):
+class SearchSig(dspy.Signature):
+    query: str = dspy.InputField()
+    result: str = dspy.OutputField()
+
+class DebugAgent(dspy.Module):
     def __init__(self):
         super().__init__()
-        self.worker = with_memory(make_fake_predict(), recursive=False)
+        self.searcher = sessionify(dspy.Predict(SearchSig))
 
     def forward(self, question):
-        self.worker(question=question)
-        return dspy.Prediction(answer=get_execution_trace())
+        self.searcher(query=question)
+        # Debug: inspect the full hierarchy of sessions and their states
+        trace = get_execution_trace()
+        print(trace)  # Use during development to verify memory routing
+        return dspy.Prediction(answer=trace)
 
-app = with_memory(Agent())
+app = with_memory(DebugAgent())
 state = app.new_state()
 with app.use_state(state):
-    out = app(question="Q1")
-print("root" in out.answer and "worker" in out.answer)  # True
+    out = app(question="quantum computing")
+print("root" in out.answer and "searcher" in out.answer)  # True
 ```
 
 ---
